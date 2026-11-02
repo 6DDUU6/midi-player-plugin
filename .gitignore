@@ -1,0 +1,26 @@
+# Project build output. Keep vendor/MinHook/build source projects.
+/build/
+/dist/
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.exe
+*.exp
+*.pdb
+*.ilk
+*.pch
+*.res
+
+# Local tests and verification reports.
+/tests/
+/test*.bat
+/*_verification.json
+
+# Local editor and Python caches.
+/.vs/
+*.user
+*.suo
+__pycache__/
+*.py[cod]
