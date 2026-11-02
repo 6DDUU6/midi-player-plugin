@@ -135,7 +135,7 @@ void View::Sidebar(bool locked) {
     }
     if (ImGui::BeginTabItem("音符设置",nullptr,inspectorRequest_==1 ? ImGuiTabItemFlags_SetSelected:0)) {
     ImGui::Separator();auto note=Note();if (note) {
-        ImGui::TextColored(ImVec4(.7f,.84f,1,1),"选中：%s · %c",notepalette::RowName(note->row),notepalette::RowKey(note->row));
+        ImGui::TextColored(ImVec4(.7f,.84f,1,1),"选中：%s %d · %c",notepalette::RowLabel(note->row),7-note->row%7,notepalette::RowKey(note->row));
         float start=note->start/float(composition::PPQ),length=note->length/float(composition::PPQ);int velocity=note->velocity;
         ImGui::SetNextItemWidth(S(135));bool change=ImGui::InputFloat("开始 / 拍",&start,.25f,1,"%.2f");
         ImGui::SetNextItemWidth(S(135));change=ImGui::InputFloat("时长 / 拍",&length,.25f,1,"%.2f") || change;
@@ -157,7 +157,7 @@ void View::Sidebar(bool locked) {
 void View::Grid(const app::Status& status,bool focused,bool locked) {
     const auto& io=ImGui::GetIO();float span=project.beats/zoom_;span=std::max(1.f,span);pan_=std::max(0.f,std::min(float(project.beats)-span,pan_));
     ImGui::BeginChild("composer_roll",ImVec2(0,0),ImGuiChildFlags_Borders,ImGuiWindowFlags_AlwaysVerticalScrollbar|((io.KeyCtrl || io.KeyShift) ? ImGuiWindowFlags_NoScrollWithMouse:0));
-    auto origin=ImGui::GetCursorScreenPos();float width=ImGui::GetContentRegionAvail().x,keyWidth=S(80),rulerHeight=S(30);
+    auto origin=ImGui::GetCursorScreenPos();float width=ImGui::GetContentRegionAvail().x,keyWidth=S(100),rulerHeight=S(30);
     float rowHeight=std::max(S(14),std::min(S(24),(ImGui::GetContentRegionAvail().y-rulerHeight)/21));
     float left=origin.x+keyWidth,right=origin.x+width,top=origin.y+rulerHeight,bottom=top+21*rowHeight;
     float beatWidth=std::max(1.f,(right-left)/span);auto draw=ImGui::GetWindowDrawList();
@@ -168,7 +168,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
         float y=top+row*rowHeight;draw->AddRectFilled(ImVec2(origin.x,y),ImVec2(right,y+rowHeight),(row/7)%2 ? IM_COL32(26,34,43,255):IM_COL32(23,29,38,255));
         draw->AddRectFilled(ImVec2(origin.x,y),ImVec2(left,y+rowHeight),row==audition_ ? IM_COL32(53,104,113,255):IM_COL32(34,44,54,255));
         if (row==13) ui::MarkRect("composer_piano",ImVec2(origin.x,y),ImVec2(left,y+rowHeight));
-        char label[64];sprintf_s(label,"%c  %s %d",notepalette::RowKey(row),notepalette::RowName(row),notepalette::RowPitch(row)/12-1);
+        char label[64];sprintf_s(label,"%c  %s %d",notepalette::RowKey(row),notepalette::RowLabel(row),7-row%7);
         draw->AddText(ImGui::GetFont(),std::min(ImGui::GetFontSize(),rowHeight-S(2)),ImVec2(origin.x+S(6),y+S(1)),IM_COL32(180,199,213,255),label);draw->AddLine(ImVec2(origin.x,y+rowHeight),ImVec2(right,y+rowHeight),IM_COL32(44,53,63,255));
     }
     int snapTicks=composition::PPQ/(1<<snap_);float gridStep=1.f/(1<<snap_);
@@ -188,7 +188,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
             bool current=int(i)==selected_,chosen=current && n.id==note_;ImVec2 a(std::max(left,x1),y+S(2)),b(std::min(right,x2),y+rowHeight-S(3));
             bool active=Active(status.transport.state) && n.start<=playbackTick && n.start+n.length>playbackTick;
             draw->AddRectFilled(a,b,Color(track,active ? 255:current ? 230:150),S(2));
-            if (current) {draw->AddRect(a,b,chosen ? IM_COL32(255,236,179,255):Color(track),S(2),0,S(chosen ? 2.f:1.f));if (x2-x1>S(36)) draw->AddText(ImVec2(a.x+S(4),a.y),IM_COL32(17,27,32,255),notepalette::RowName(n.row));}
+            if (current) {draw->AddRect(a,b,chosen ? IM_COL32(255,236,179,255):Color(track),S(2),0,S(chosen ? 2.f:1.f));if (x2-x1>S(36)) draw->AddText(ImVec2(a.x+S(4),a.y),IM_COL32(17,27,32,255),notepalette::RowLabel(n.row));}
             if (chosen) ui::MarkRect("composer_note",a,b);
             if (hovered && io.MousePos.x>=a.x && io.MousePos.x<=b.x && io.MousePos.y>=a.y && io.MousePos.y<=b.y) {hitTrack=int(i);hit=n.id;edge=io.MousePos.x>=x2-S(7);}
         }
@@ -198,7 +198,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     bool input=focused && !locked && !io.AppFocusLost && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);int row=int((io.MousePos.y-top)/rowHeight);
     if (hit && hovered) {
         const composition::Note* n=nullptr;for (const auto& item:project.tracks[hitTrack].notes) if (item.id==hit) n=&item;
-        if (n) ImGui::SetTooltip("%s · %c / %s · MIDI %d\n开始 %.2f 拍 · 时长 %.2f 拍 · 力度 %d\n拖动移动 · 拖右边缘改时长 · 右键删除",project.tracks[hitTrack].name.c_str(),notepalette::RowKey(n->row),notepalette::RowName(n->row),notepalette::RowPitch(n->row),n->start/double(composition::PPQ),n->length/double(composition::PPQ),n->velocity);
+        if (n) ImGui::SetTooltip("%s · %c / %s %d\n开始 %.2f 拍 · 时长 %.2f 拍 · 力度 %d\n拖动移动 · 拖右边缘改时长 · 右键删除",project.tracks[hitTrack].name.c_str(),notepalette::RowKey(n->row),notepalette::RowLabel(n->row),7-n->row%7,n->start/double(composition::PPQ),n->length/double(composition::PPQ),n->velocity);
         ImGui::SetMouseCursor(edge ? ImGuiMouseCursor_ResizeEW:ImGuiMouseCursor_Hand);
     }
     if (input && hovered && ImGui::IsMouseClicked(1) && hit) {Select(hitTrack);note_=hit;Remove();}

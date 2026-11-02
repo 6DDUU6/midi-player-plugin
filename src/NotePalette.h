@@ -15,5 +15,10 @@ inline const char* RowName(int row) {
     const char* names[]={"do","re","mi","fa","so","la","ti"};
     return names[6-row%7];
 }
+inline const char* RowLabel(int row) {
+    const char* names[3][7]={{"↑do","↑re","↑mi","↑fa","↑so","↑la","↑ti"},
+        {"do","re","mi","fa","so","la","ti"},{"↓do","↓re","↓mi","↓fa","↓so","↓la","↓ti"}};
+    return row>=0 && row<Count ? names[row/7][6-row%7]:"?";
+}
 inline int Row(int pitch) {for (int row=0;row<Count;++row) if (RowPitch(row)==pitch) return row;return -1;}
 }

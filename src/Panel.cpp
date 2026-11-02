@@ -298,15 +298,16 @@ void Draw() {
     ImGui::SetNextWindowPos(ImVec2(0,0));ImGui::SetNextWindowSize(display);
     ImGui::Begin("MIDI STUDIO###main",nullptr,ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImGui::AlignTextToFramePadding();ImGui::PushFont(nullptr,22);ImGui::TextUnformatted("MIDI STUDIO");ImGui::PopFont();ImGui::SameLine();ImGui::TextDisabled(previewMode ? "自动演奏 / 界面预览":"自动演奏 / 游戏插件");
+    ImGui::SameLine(0,S(24));ImGui::BeginDisabled(editor.open || loading);
+    if (ImGui::RadioButton("自动演奏 / 时间轴",!manualView && !compositionView) && (manualView || compositionView)) {performanceView.Release();composerView.Release();Stop();manualView=compositionView=false;dirty=true;}ui::Mark("mode_auto");
+    ImGui::SameLine();if (ImGui::RadioButton("手动演奏 / 键盘",manualView) && !manualView && Commit()) {composerView.Release();Stop();manualView=true;compositionView=false;dirty=true;}ui::Mark("mode_manual");
+    ImGui::SameLine();if (ImGui::RadioButton("创作模式 / 钢琴卷帘",compositionView) && !compositionView && Commit()) {performanceView.Release();Stop();manualView=false;compositionView=true;dirty=true;viewer.open=false;}ui::Mark("mode_composer");
+    ImGui::EndDisabled();
     ImGui::SameLine(std::max(ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x+S(20),ImGui::GetWindowWidth()-S(325)));
     if (ImGui::Checkbox("手动弹奏日志",&manualLogging)) {app::SetManualLogging(manualLogging);lastLog.clear();}ui::Mark("logging");ImGui::SameLine();if (ImGui::Button("使用说明")) ImGui::OpenPopup("help");
     if (ImGui::BeginPopup("help")) {ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+S(470));
         ImGui::TextUnformatted("1. 在游戏演奏界面手动弹一个音，短音轨需手动弹一个短音。\n2. 加载 MIDI，勾选音轨，在右侧选择游戏乐器。\n3. 需要时校准中音 Do，或打开音高映射指定 noteKey。\n4. 点击开始，在倒计时内切回游戏。\n\n时间轴：点或拖动顶部刻度选播放位置；Ctrl+滚轮缩放，Shift+滚轮平移。黄色竖线表示当前曲内时间；跟随播放会自动翻到后续片段。双击音轨查看音符。\n音轨表：默认显示映射条数，右键表头管理其他列。\n\nCtrl+-  显示 / 隐藏\nCtrl+Alt+P  开始 / 暂停\nCtrl+Alt+S  停止");ImGui::PopTextWrapPos();ImGui::EndPopup();}
-    ImGui::Separator();ImGui::BeginDisabled(editor.open || loading);
-    if (ImGui::RadioButton("自动演奏 / 时间轴",!manualView && !compositionView) && (manualView || compositionView)) {performanceView.Release();composerView.Release();Stop();manualView=compositionView=false;dirty=true;}ui::Mark("mode_auto");
-    ImGui::SameLine();if (ImGui::RadioButton("手动演奏 / 键盘",manualView) && !manualView && Commit()) {composerView.Release();Stop();manualView=true;compositionView=false;dirty=true;}ui::Mark("mode_manual");
-    ImGui::SameLine();if (ImGui::RadioButton("创作模式 / 钢琴卷帘",compositionView) && !compositionView && Commit()) {performanceView.Release();Stop();manualView=false;compositionView=true;dirty=true;viewer.open=false;}ui::Mark("mode_composer");
-    ImGui::EndDisabled();ImGui::Separator();float logHeight=manualLogging ? S(150):0;
+    ImGui::Separator();float logHeight=manualLogging ? S(150):0;
     if (compositionView) {
         float height=std::max(S(260),ImGui::GetContentRegionAvail().y-S(44)-(manualLogging ? logHeight+S(9):0));
         composerView.Draw(status,window,height,smokeMode || GetForegroundWindow()==window);
