@@ -1,6 +1,7 @@
 #include "Performance.h"
 #include "InstrumentConfig.h"
 #include "ImGuiHost.h"
+#include "NotePalette.h"
 #include <algorithm>
 #include <cstdio>
 namespace performance {
@@ -8,7 +9,6 @@ namespace {
 const char* keys[3]={"QWERTYU","ASDFGHJ","ZXCVBNM"};
 const char* degrees[7]={"do","re","mi","fa","so","la","ti"};
 const char* octaves[3]={"高音 / +1 八度","中音 / 基准八度","低音 / -1 八度"};
-const int offsets[7]={0,2,4,5,7,9,11};
 const ImGuiKey keyboardKeys[21]={ImGuiKey_Q,ImGuiKey_W,ImGuiKey_E,ImGuiKey_R,ImGuiKey_T,ImGuiKey_Y,ImGuiKey_U,
     ImGuiKey_A,ImGuiKey_S,ImGuiKey_D,ImGuiKey_F,ImGuiKey_G,ImGuiKey_H,ImGuiKey_J,
     ImGuiKey_Z,ImGuiKey_X,ImGuiKey_C,ImGuiKey_V,ImGuiKey_B,ImGuiKey_N,ImGuiKey_M};
@@ -26,7 +26,7 @@ void View::Load(const std::wstring& path) {
     instrumentui::SetInstrumentText(instrument,sizeof(instrument),config.instrument);
 }
 int View::Key(int slot) const {
-    try {return player::MapNoteKey(config,60+(1-slot/7)*12+offsets[slot%7]);} catch (...) {return 0;}
+    try {return player::MapNoteKey(config,notepalette::Pitch(slot));} catch (...) {return 0;}
 }
 bool View::Save() {
     const wchar_t* names[]={L"instrument",L"sustained",L"middleDo",L"transpose"};

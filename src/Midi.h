@@ -15,11 +15,15 @@ struct Track {
     uint16_t channels = 0;
     std::vector<int> programs;
     uint64_t endTick = 0;
+    int gameInstrument=0,gameMiddleDo=48;
+    bool gameSustained=false;
 };
+struct TempoChange {uint64_t tick;uint32_t microseconds;};
 struct Song {
     int format = 0, division = 0;
     double durationMs = 0;
     std::vector<Track> tracks;
+    std::vector<TempoChange> tempos;
     std::vector<std::string> warnings;
 };
 // SMF 0/1; PPQ tempo maps and SMPTE timing. Throws std::runtime_error on malformed input.

@@ -19,5 +19,7 @@ void Muted(const char* text);
 // Synthetic input is enabled only by the preview's --smoke run.
 void EnableTestInput(bool enabled);
 void Mark(const char* name);
-bool TestMouse(const char* name,bool down,float fraction=.5f);
+void MarkRect(const char* name,const ImVec2& min,const ImVec2& max);
+bool TestMouse(const char* name,bool down,float fraction=.5f,float vertical=.5f);
+bool TestWheel(const char* name,bool control,float delta);
 }

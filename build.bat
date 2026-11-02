@@ -22,7 +22,7 @@ cl.exe %COMMON% /c vendor\ImGui\imgui.cpp vendor\ImGui\imgui_draw.cpp vendor\ImG
 if errorlevel 1 exit /b 1
 lib.exe /nologo /OUT:build\ImGui.x64.lib build\imgui\*.obj
 if errorlevel 1 exit /b 1
-set SOURCES=src\Midi.cpp src\Player.cpp src\Locator.cpp src\Discover.cpp src\GameBridge.cpp src\App.cpp src\ImGuiHost.cpp src\InstrumentConfig.cpp src\Timeline.cpp src\Performance.cpp src\Panel.cpp
+set SOURCES=src\Midi.cpp src\Player.cpp src\Locator.cpp src\Discover.cpp src\GameBridge.cpp src\App.cpp src\ImGuiHost.cpp src\InstrumentConfig.cpp src\Timeline.cpp src\Performance.cpp src\Composition.cpp src\Composer.cpp src\Panel.cpp
 set LIBS=build\MinHook.x64.lib build\ImGui.x64.lib user32.lib kernel32.lib comdlg32.lib gdi32.lib imm32.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib
 cl.exe %COMMON% /LD dllmain.cpp %SOURCES% /Fobuild\ /Fedist\MidiPlayerPlugin.dll /link /MACHINE:X64 %LIBS%
 if errorlevel 1 exit /b 1

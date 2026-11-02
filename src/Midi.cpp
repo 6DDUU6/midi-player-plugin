@@ -3,6 +3,7 @@
 #include <array>
 #include <deque>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
@@ -21,7 +22,7 @@ struct Reader {
     }
     bool tag(const char* s) { need(4); bool ok=std::equal(b.begin()+p,b.begin()+p+4,s); p+=4; return ok; }
 };
-struct Raw { uint64_t tick; size_t order, track; int status, a, b; };
+struct Raw { uint64_t tick; size_t order, track; int status, a, b,port; };
 struct Tempo {
     uint64_t tick; size_t order; uint32_t us; double atMs;
     Tempo(uint64_t t,size_t o,uint32_t u,double at):tick(t),order(o),us(u),atMs(at) {}
@@ -52,7 +53,7 @@ Song Parse(const std::vector<uint8_t>& bytes) {
         if (!r.tag("MTrk")) throw std::runtime_error("Missing MTrk chunk");
         auto length=r.u32(); r.need(length);
         Reader t{bytes,r.p,r.p+length}; r.p+=length;
-        uint64_t tick=0; uint8_t running=0; bool ended=false;
+        uint64_t tick=0; uint8_t running=0; bool ended=false;int port=0;
         while (t.p<t.end) {
             if (++eventCount>2000000) throw std::runtime_error("MIDI has too many events");
             auto delta=t.vlq();
@@ -66,6 +67,14 @@ Song Parse(const std::vector<uint8_t>& bytes) {
                 running=0; auto type=t.u8(); auto n=t.vlq(); t.need(n);
                 if (type==3 && s.tracks[ti].name.empty())
                     s.tracks[ti].name.assign(reinterpret_cast<const char*>(bytes.data()+t.p),n);
+                if (type==0x21 && n==1 && bytes[t.p]<128) port=bytes[t.p];
+                if (type==0x7f && n==14 && bytes[t.p]==0x7d && bytes[t.p+1]=='M' && bytes[t.p+2]=='P' && bytes[t.p+3]=='P' && bytes[t.p+4]==1) {
+                    auto number=[&](size_t at) {uint32_t v=0;for (int i=0;i<4;++i) v=(v<<8)|bytes[at+i];return v;};
+                    auto instrument=number(t.p+5),middle=number(t.p+9);
+                    if (instrument>=1 && instrument<=1000000 && middle>=13 && middle<=999977 && bytes[t.p+13]<=1) {
+                        s.tracks[ti].gameInstrument=int(instrument);s.tracks[ti].gameMiddleDo=int(middle);s.tracks[ti].gameSustained=bytes[t.p+13]!=0;
+                    }
+                }
                 if (type==81) {
                     if (n!=3) throw std::runtime_error("Invalid tempo event length");
                     uint32_t us=(uint32_t(bytes[t.p])<<16)|(uint32_t(bytes[t.p+1])<<8)|bytes[t.p+2];
@@ -83,44 +92,46 @@ Song Parse(const std::vector<uint8_t>& bytes) {
                 s.tracks[ti].channels|=uint16_t(1u<<(status&15));
                 if (op==192 && std::find(s.tracks[ti].programs.begin(),s.tracks[ti].programs.end(),a)==s.tracks[ti].programs.end())
                     s.tracks[ti].programs.push_back(a);
-                events.push_back({tick,eo,ti,status,a,b});
+                events.push_back({tick,eo,ti,status,a,b,port});
             } else throw std::runtime_error("Unsupported status in MIDI track");
         }
         if (!ended) s.warnings.push_back("Track "+std::to_string(ti+1)+" has no end-of-track marker");
         s.tracks[ti].endTick=tick; lastTick=std::max(lastTick,tick);
     }
     std::stable_sort(events.begin(),events.end(),[](const Raw& a,const Raw& b){ return a.tick!=b.tick ? a.tick<b.tick : a.order<b.order; });
-    std::array<std::array<std::deque<Ref>,128>,16> active;
-    std::array<std::vector<Ref>,16> held; std::array<bool,16> sustain{};
+    struct Port {std::array<std::array<std::deque<Ref>,128>,16> active;std::array<std::vector<Ref>,16> held;std::array<bool,16> sustain{};};
+    std::map<int,Port> ports;
     auto finish=[&](Ref ref,uint64_t at) { auto& n=s.tracks[ref.track].notes[ref.note]; n.endTick=std::max(at,n.startTick); };
-    auto off=[&](int ch,int pitch,uint64_t at) {
-        auto& q=active[ch][pitch]; if (q.empty()) return;
-        auto ref=q.front(); q.pop_front(); if (sustain[ch]) held[ch].push_back(ref); else finish(ref,at);
+    auto off=[&](Port& port,int ch,int pitch,uint64_t at) {
+        auto& q=port.active[ch][pitch]; if (q.empty()) return;
+        auto ref=q.front(); q.pop_front(); if (port.sustain[ch]) port.held[ch].push_back(ref); else finish(ref,at);
     };
     for (const auto& e:events) {
+        auto& port=ports[e.port];
         int ch=e.status&15, op=e.status&240;
         if (op==144 && e.b) {
             auto& ns=s.tracks[e.track].notes;
             Note n; n.pitch=e.a; n.velocity=e.b; n.channel=ch; n.startTick=n.endTick=e.tick;
-            ns.push_back(n); active[ch][e.a].push_back({e.track,ns.size()-1});
-        } else if (op==128 || (op==144 && !e.b)) off(ch,e.a,e.tick);
+            ns.push_back(n); port.active[ch][e.a].push_back({e.track,ns.size()-1});
+        } else if (op==128 || (op==144 && !e.b)) off(port,ch,e.a,e.tick);
         else if (op==176 && e.a==64) {
-            sustain[ch]=e.b>=64;
-            if (!sustain[ch]) { for (auto ref:held[ch]) finish(ref,e.tick); held[ch].clear(); }
+            port.sustain[ch]=e.b>=64;
+            if (!port.sustain[ch]) { for (auto ref:port.held[ch]) finish(ref,e.tick); port.held[ch].clear(); }
         } else if (op==176 && (e.a==120 || e.a==123)) {
-            for (int p=0;p<128;++p) while (!active[ch][p].empty()) off(ch,p,e.tick);
-            if (e.a==120) { for (auto ref:held[ch]) finish(ref,e.tick); held[ch].clear(); }
+            for (int p=0;p<128;++p) while (!port.active[ch][p].empty()) off(port,ch,p,e.tick);
+            if (e.a==120) { for (auto ref:port.held[ch]) finish(ref,e.tick); port.held[ch].clear(); }
         }
     }
     size_t dangling=0;
-    for (int ch=0;ch<16;++ch) {
-        for (auto& q:active[ch]) for (auto ref:q) { finish(ref,lastTick); ++dangling; }
-        for (auto ref:held[ch]) { finish(ref,lastTick); ++dangling; }
+    for (auto& pair:ports) for (int ch=0;ch<16;++ch) {
+        for (auto& q:pair.second.active[ch]) for (auto ref:q) { finish(ref,lastTick); ++dangling; }
+        for (auto ref:pair.second.held[ch]) { finish(ref,lastTick); ++dangling; }
     }
     if (dangling) s.warnings.push_back(std::to_string(dangling)+" unclosed notes ended at song end");
     std::stable_sort(tempos.begin(),tempos.end(),[](const Tempo& a,const Tempo& b){ return a.tick!=b.tick ? a.tick<b.tick : a.order<b.order; });
     std::vector<Tempo> map;
     for (auto tempo:tempos) { if (!map.empty() && map.back().tick==tempo.tick) map.back()=tempo; else map.push_back(tempo); }
+    for (const auto& tempo:map) s.tempos.push_back({tempo.tick,tempo.us});
     for (size_t i=1;i<map.size();++i)
         map[i].atMs=map[i-1].atMs+double(map[i].tick-map[i-1].tick)*map[i-1].us/(s.division*1000.0);
     auto ms=[&](uint64_t tick) {
