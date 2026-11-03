@@ -5,11 +5,11 @@
 
 namespace composition {
 constexpr int PPQ=960,MaxTracks=128,MaxBeats=4096;
-constexpr float MaxZoom=100.f;
 constexpr int MinNoteLength=PPQ/16;
 bool IsNoteLength(int ticks);
 // Round to the nearest 1/16 beat that fits; ties round up. Zero means no duration fits.
 int QuantizeLength(double ticks,int available=MaxBeats*PPQ);
+std::string LengthLabel(int ticks);
 struct Note {
     unsigned id=0;
     int row=14,start=0,length=PPQ,velocity=100;
@@ -26,7 +26,8 @@ struct ImportStats {size_t imported=0,converted=0,skipped=0,merged=0,quantized=0
 struct LengthStats {size_t adjusted=0,merged=0;};
 struct EditorSettings {
     int selectedTrack=0,snap=2,newLength=PPQ,velocity=100,inspectorTab=0;
-    float zoom=2,pan=0,sidebarWidth=245,trackScroll=0;
+    double zoom=2,pan=0;
+    float sidebarWidth=245,trackScroll=0;
     double positionBeat=0;
     bool receiveGame=true,moreSettings=false;
     unsigned activeNote=0;
@@ -53,7 +54,8 @@ struct Project {
     void Validate() const;
     LengthStats QuantizeLengths(EditorSettings* editor=nullptr);
     std::vector<uint8_t> Midi() const;
-    // An editor snapshot writes V3 with exact values; omitting it retains the V2 data-only format.
+    // V4 retains double precision for zoom and pan; V1-V3 remain readable.
+    // Omitting the editor retains the V2 data-only format.
     std::vector<uint8_t> Draft(const EditorSettings* editor=nullptr) const;
     static Project ReadDraft(const std::vector<uint8_t>& bytes,EditorSettings* editor=nullptr);
     static Project Import(const midi::Song& song,ImportStats& stats);

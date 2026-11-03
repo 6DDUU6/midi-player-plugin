@@ -37,7 +37,7 @@ struct Reader {
 };
 void ValidateEditor(const Project& p,const EditorSettings& e) {
     if (e.selectedTrack<0 || e.selectedTrack>=int(p.tracks.size()) || e.snap<0 || e.snap>4 || e.newLength<1 || e.newLength>MaxBeats*PPQ ||
-        e.velocity<1 || e.velocity>127 || e.inspectorTab<0 || e.inspectorTab>1 || !std::isfinite(e.zoom) || e.zoom<1 || e.zoom>MaxZoom ||
+        e.velocity<1 || e.velocity>127 || e.inspectorTab<0 || e.inspectorTab>1 || !std::isfinite(e.zoom) || e.zoom<1 ||
         !std::isfinite(e.pan) || e.pan<0 || e.pan>p.beats || !std::isfinite(e.positionBeat) || e.positionBeat<0 || e.positionBeat>p.beats ||
         !std::isfinite(e.sidebarWidth) || e.sidebarWidth<1 || e.sidebarWidth>10000 || !std::isfinite(e.trackScroll) || e.trackScroll<0 || e.trackScroll>1000000 ||
         e.selection.size()>p.NoteCount()) throw std::runtime_error("创作工程界面设置无效。");
@@ -55,6 +55,12 @@ int QuantizeLength(double ticks,int available) {
     int maximum=std::min(available,MaxBeats*PPQ)/MinNoteLength;
     double steps=std::floor(ticks/MinNoteLength+.5);
     return int(std::max(1.,std::min(double(maximum),steps)))*MinNoteLength;
+}
+std::string LengthLabel(int ticks) {
+    int steps=QuantizeLength(ticks)/MinNoteLength,whole=steps/16,numerator=steps%16,denominator=16;
+    if (!numerator) return std::to_string(whole);
+    while (numerator%2==0) {numerator/=2;denominator/=2;}
+    return (whole ? std::to_string(whole)+"+":"")+std::to_string(numerator)+"/"+std::to_string(denominator);
 }
 Project::Project() {AddTrack();}
 int Project::AddTrack() {
@@ -193,7 +199,7 @@ Bytes Project::Midi() const {
     }return out;
 }
 Bytes Project::Draft(const EditorSettings* editor) const {
-    Validate();if (editor) ValidateEditor(*this,*editor);Bytes out={'M','P','C',uint8_t(editor ? 3:2)};
+    Validate();if (editor) ValidateEditor(*this,*editor);Bytes out={'M','P','C',uint8_t(editor ? 4:2)};
     auto duration=[&](double ms) {if (editor) F64(out,ms);else U32(out,Tempo(ms));};
     U32(out,uint32_t(beats));duration(beatMs);U32(out,nextId);U32(out,uint32_t(beatTimes.size()));
     for (const auto& beat:beatTimes) {U32(out,uint32_t(beat.first));duration(beat.second);}
@@ -205,15 +211,15 @@ Bytes Project::Draft(const EditorSettings* editor) const {
     }
     if (editor) {
         const auto& e=*editor;U32(out,uint32_t(e.selectedTrack));U32(out,uint32_t(e.snap));U32(out,uint32_t(e.newLength));U32(out,uint32_t(e.velocity));
-        F32(out,e.zoom);F32(out,e.pan);F64(out,e.positionBeat);U32(out,uint32_t(e.receiveGame));U32(out,e.activeNote);
+        F64(out,e.zoom);F64(out,e.pan);F64(out,e.positionBeat);U32(out,uint32_t(e.receiveGame));U32(out,e.activeNote);
         U32(out,uint32_t(e.selection.size()));for (auto id:e.selection) U32(out,id);
         U32(out,uint32_t(e.inspectorTab));U32(out,uint32_t(e.moreSettings));F32(out,e.sidebarWidth);F32(out,e.trackScroll);
     }return out;
 }
 Project Project::ReadDraft(const Bytes& bytes,EditorSettings* editor) {
     if (bytes.size()>8*1024*1024) throw std::runtime_error("创作草稿过大。");
-    Reader in{bytes};auto version=in.U32();if (version<0x4d504301 || version>0x4d504303) throw std::runtime_error("无法识别创作工程版本。");
-    bool full=version==0x4d504303;auto duration=[&]() {return full ? in.F64():in.U32()/1000.;};
+    Reader in{bytes};auto version=in.U32();if (version<0x4d504301 || version>0x4d504304) throw std::runtime_error("无法识别创作工程版本。");
+    bool full=version>=0x4d504303;auto duration=[&]() {return full ? in.F64():in.U32()/1000.;};
     Project p;p.tracks.clear();p.beats=int(in.U32());p.beatMs=duration();p.nextId=in.U32();auto beatCount=in.U32();if (beatCount>MaxBeats) throw std::runtime_error("创作草稿拍数无效。");
     for (uint32_t i=0;i<beatCount;++i) {int beat=int(in.U32());double ms=duration();if (!p.beatTimes.emplace(beat,ms).second) throw std::runtime_error("创作草稿拍数重复。");}
     if (version>=0x4d504302) {auto tempos=in.U32();if (tempos>65536) throw std::runtime_error("创作草稿速度变化过多。");for (uint32_t i=0;i<tempos;++i) {int tick=int(in.U32());double ms=duration();if (!p.tempoChanges.emplace(tick,ms).second) throw std::runtime_error("创作草稿速度变化重复。");}}
@@ -225,7 +231,8 @@ Project Project::ReadDraft(const Bytes& bytes,EditorSettings* editor) {
     }
     EditorSettings e;
     if (full) {
-        e.selectedTrack=int(in.U32());e.snap=int(in.U32());e.newLength=int(in.U32());e.velocity=int(in.U32());e.zoom=in.F32();e.pan=in.F32();e.positionBeat=in.F64();
+        e.selectedTrack=int(in.U32());e.snap=int(in.U32());e.newLength=int(in.U32());e.velocity=int(in.U32());
+        e.zoom=version>=0x4d504304 ? in.F64():in.F32();e.pan=version>=0x4d504304 ? in.F64():in.F32();e.positionBeat=in.F64();
         e.receiveGame=in.Bool();e.activeNote=in.U32();auto selectedCount=in.U32();if (selectedCount>200000) throw std::runtime_error("创作工程选择数量无效。");
         for (uint32_t i=0;i<selectedCount;++i) if (!e.selection.insert(in.U32()).second) throw std::runtime_error("创作工程选择标识重复。");
         e.inspectorTab=int(in.U32());e.moreSettings=in.Bool();e.sidebarWidth=in.F32();e.trackScroll=in.F32();

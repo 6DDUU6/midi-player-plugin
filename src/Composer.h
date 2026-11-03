@@ -16,7 +16,7 @@ public:
     void TogglePlayback(const app::Status& status);
     void ResetPlayback();
     int SelectedTrack() const {return selected_;}
-    float Zoom() const {return zoom_;}
+    double Zoom() const {return zoom_;}
     double PositionBeat() const {return positionBeat_;}
     size_t SelectionCount() const {return selection_.size();}
     bool Recording() const {return recording_;}
@@ -35,15 +35,17 @@ private:
     std::set<unsigned> selection_;
     std::set<unsigned> boxSelection_;
     bool boxSelecting_=false,boxDragged_=false;
-    float boxBeat_=0,boxRow_=0;
-    float zoom_=2,pan_=0;
+    double boxBeat_=0;
+    float boxRow_=0;
+    double zoom_=2,pan_=0;
     char name_[256]{},instrument_[96]{};
     bool dragging_=false,resizing_=false;
     bool dragRemembered_=false,deselectOnRelease_=false;
     int dragFirstTick_=0,dragEndTick_=0,dragLowRow_=0,dragHighRow_=0,dragTick_=0,dragRow_=0;
     bool seeking_=false,transportLoaded_=false;
     bool panning_=false,scrolling_=false;
-    float panMouseX_=0,panAnchor_=0,scrollOffset_=0;
+    float panMouseX_=0,scrollOffset_=0;
+    double panAnchor_=0;
     double positionBeat_=0;
     struct RecordVoice {unsigned note;int track;double startTick;RecordVoice(unsigned n=0,int t=0,double start=0):note(n),track(t),startTick(start) {}};
     std::array<RecordVoice,21> recordVoices_{};
@@ -92,6 +94,8 @@ private:
     void ReleaseRecordingVoices();
     void RecordInput(const app::Status& status,bool input);
     void KeyboardInput(const app::Status& status,bool input);
+    double Span() const;
+    void ZoomAt(double zoom,double anchor=0);
     void RecordGameInput();
     unsigned AddRecordedNote(int row,double tick,int length);
     void ExtendRecordedNote(const RecordVoice& voice,double endTick);
