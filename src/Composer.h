@@ -33,6 +33,9 @@ private:
     std::array<double,21> auditionEnds_{};
     unsigned note_=0;
     std::set<unsigned> selection_;
+    std::set<unsigned> boxSelection_;
+    bool boxSelecting_=false,boxDragged_=false;
+    float boxBeat_=0,boxRow_=0;
     float zoom_=2,pan_=0;
     char name_[256]{},instrument_[96]{};
     bool dragging_=false,resizing_=false;
@@ -66,6 +69,7 @@ private:
     void Select(int track,bool clear=true);
     void FocusSelection(unsigned preferred=0);
     void PruneSelection();
+    void EndBoxSelection(bool cancel=false);
     void BeginDrag(bool resize,bool remembered=false);
     composition::Note* Note();
     composition::EditorSettings Settings() const;

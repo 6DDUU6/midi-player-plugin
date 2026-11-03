@@ -5,6 +5,7 @@
 
 namespace composition {
 constexpr int PPQ=960,MaxTracks=128,MaxBeats=4096;
+constexpr float MaxZoom=100.f;
 struct Note {
     unsigned id=0;
     int row=14,start=0,length=PPQ,velocity=100;

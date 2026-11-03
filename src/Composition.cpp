@@ -37,7 +37,7 @@ struct Reader {
 };
 void ValidateEditor(const Project& p,const EditorSettings& e) {
     if (e.selectedTrack<0 || e.selectedTrack>=int(p.tracks.size()) || e.snap<0 || e.snap>4 || e.newLength<1 || e.newLength>MaxBeats*PPQ ||
-        e.velocity<1 || e.velocity>127 || e.inspectorTab<0 || e.inspectorTab>1 || !std::isfinite(e.zoom) || e.zoom<1 || e.zoom>32 ||
+        e.velocity<1 || e.velocity>127 || e.inspectorTab<0 || e.inspectorTab>1 || !std::isfinite(e.zoom) || e.zoom<1 || e.zoom>MaxZoom ||
         !std::isfinite(e.pan) || e.pan<0 || e.pan>p.beats || !std::isfinite(e.positionBeat) || e.positionBeat<0 || e.positionBeat>p.beats ||
         !std::isfinite(e.sidebarWidth) || e.sidebarWidth<1 || e.sidebarWidth>10000 || !std::isfinite(e.trackScroll) || e.trackScroll<0 || e.trackScroll>1000000 ||
         e.selection.size()>p.NoteCount()) throw std::runtime_error("创作工程界面设置无效。");
