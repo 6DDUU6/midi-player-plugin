@@ -332,7 +332,7 @@ void View::Play(const app::Status& status) {
         if (!app::Send(load)) throw std::runtime_error("命令队列已满。");
         if (positionBeat_>=project.beats) positionBeat_=0;
         if (positionBeat_>0) {app::Command seek;seek.action=app::Action::Seek;seek.value=project.Time(positionBeat_);if (!app::Send(seek)) throw std::runtime_error("命令队列已满。");}
-        app::Command play;play.action=app::Action::Play;play.value=status.preview ? 0:3000;
+        app::Command play;play.action=app::Action::Play;play.value=0;
         if (!app::Send(play)) throw std::runtime_error("命令队列已满。");transportLoaded_=true;error_.clear();Release();
     }catch (const std::exception& e) {error_=e.what();}
 }
@@ -466,9 +466,16 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     }
     int snapTicks=composition::PPQ/(1<<snap_);float gridStep=1.f/(1<<snap_);
     for (float b=std::ceil(pan_/gridStep)*gridStep;b<=pan_+span+.001f;b+=gridStep) {
-        float x=left+(b-pan_)*beatWidth;bool whole=std::abs(b-std::round(b))<.001f,bar=whole && int(std::round(b))%4==0;
-        draw->AddLine(ImVec2(x,whole ? origin.y:top),ImVec2(x,bottom),bar ? IM_COL32(95,113,130,200):whole ? IM_COL32(66,82,98,200):IM_COL32(43,53,64,100));
-        if (whole && beatWidth>=S(26)) {char label[32];sprintf_s(label,"%d.%d",int(b)/4+1,int(b)%4+1);draw->AddText(ImVec2(x+S(3),origin.y+S(5)),IM_COL32(172,188,206,255),label);}
+        if (std::abs(b*2-std::round(b*2))<.001f) continue;
+        float x=left+(b-pan_)*beatWidth;draw->AddLine(ImVec2(x,top),ImVec2(x,bottom),IM_COL32(43,53,64,100));
+    }
+    char longestLabel[32];sprintf_s(longestLabel,"%d.5",int(std::ceil(pan_+span)));int labelStride=1;
+    // Keep half-beat ticks at every zoom; omit crowded labels at regular intervals.
+    while (labelStride*beatWidth*.5f<ImGui::CalcTextSize(longestLabel).x+S(8)) labelStride*=2;
+    for (int half=int(std::ceil(pan_*2));half<=int(std::floor((pan_+span)*2+.001f));++half) {
+        float x=left+(half*.5f-pan_)*beatWidth;bool whole=half%2==0,bar=half%8==0;
+        draw->AddLine(ImVec2(x,origin.y),ImVec2(x,bottom),bar ? IM_COL32(95,113,130,200):whole ? IM_COL32(66,82,98,200):IM_COL32(55,68,81,160));
+        if (half%labelStride==0) {char label[32];sprintf_s(label,"%d%s",half/2,whole ? "":".5");draw->AddText(ImVec2(x+S(3),origin.y+S(5)),IM_COL32(172,188,206,255),label);}
     }
     ImVec2 boxMin,boxMax;
     if (boxSelecting_) {
