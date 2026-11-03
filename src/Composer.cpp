@@ -66,15 +66,17 @@ void View::Remove() {
     selection_.clear();note_=0;error_.clear();Save();
 }
 void View::StopAudition() {
-    if (audition_>=0) {app::Command command;command.action=app::Action::ManualRelease;app::Send(command);audition_=-1;}
+    if (std::any_of(auditionEnds_.begin(),auditionEnds_.end(),[](double end) {return end>0;})) {
+        app::Command command;command.action=app::Action::ManualRelease;app::Send(command);auditionEnds_.fill(0);
+    }
 }
 void View::Release() {
-    StopRecording();StopAudition();seeking_=false;
+    StopRecording();StopAudition();seeking_=false;panning_=scrolling_=false;
     if (dragging_) {dragging_=false;Save();}
 }
 void View::LoseFocus() {
     if (!recording_ || !receiveGame_) {Release();return;}
-    Tick();ReleaseRecordingVoices();recordHeld_.fill(false);StopAudition();
+    Tick();ReleaseRecordingVoices();recordHeld_.fill(false);StopAudition();panning_=scrolling_=false;
     if (seeking_) {recordStartMs_=project.Time(positionBeat_);recordClock_=game::NowMs();seeking_=false;}
     if (dragging_) {dragging_=false;Save();}
 }
@@ -170,14 +172,36 @@ void View::RecordInput(const app::Status& status,bool input) {
     }
     if (released && recordRemembered_) Save();
 }
-void View::Audition(const app::Status& status,int row) {
+void View::KeyboardInput(const app::Status& status,bool input) {
+    const auto& io=ImGui::GetIO();
+    if (!input || io.WantTextInput || io.KeyCtrl || io.KeyAlt || io.KeySuper || ImGui::IsKeyDown(ImGuiKey_Space)) return;
+    int start=int(std::llround(positionBeat_*composition::PPQ));
+    int length=std::min(newLength_,project.beats*composition::PPQ-start);bool remembered=false;
+    for (int row=0;row<notepalette::Count;++row) {
+        auto key=ImGuiKey(ImGuiKey_A+notepalette::RowKey(row)-'A');
+        if (!ImGui::IsKeyPressed(key,false)) continue;
+        if (!project.tracks[selected_].visible) {error_="请先打开此轨的显示开关，再添加音符。";continue;}
+        if (length<=0) {error_="指针已到时间轴末尾，请先选择添加音符的位置。";continue;}
+        composition::Note candidate;candidate.row=row;candidate.start=start;candidate.length=length;candidate.velocity=velocity_;
+        if (!project.Place(selected_,candidate)) {error_="此位置已有同轨的同音高音符，请移动黄色指针后再录入。";continue;}
+        try {
+            if (!remembered) {Remember();selection_.clear();remembered=true;}
+            note_=project.AddNote(selected_,row,start,length,velocity_);newLength_=length;
+            selection_.insert(note_);inspectorRequest_=1;error_.clear();Audition(status,row,true);
+        }catch (const std::exception& e) {error_=e.what();}
+    }
+    if (remembered) Save();
+}
+void View::Audition(const app::Status& status,int row,bool chord) {
     const auto& track=project.tracks[selected_];
     bool ready=status.preview || (status.game.ready && status.game.threadId && (!player::UsesShort(track.instrument,track.sustained) || status.game.shortReady));
     if (!ready) {error_="音符已保留；试听前请先在游戏短音乐器界面弹一个音完成校准。";return;}
-    StopAudition();app::Command command;command.action=app::Action::ManualOn;command.slot=0;command.instrument=track.instrument;
+    if (!chord) StopAudition();
+    if (auditionEnds_[row]>0) {app::Command off;off.action=app::Action::ManualOff;off.slot=row;if (!app::Send(off)) {error_="试听命令队列已满。";return;}}
+    app::Command command;command.action=app::Action::ManualOn;command.slot=row;command.instrument=track.instrument;
     command.sustained=track.sustained;command.key=track.middleDo+notepalette::RowPitch(row)-60;
     if (!app::Send(command)) {error_="试听命令队列已满。";return;}
-    audition_=row;auditionEnd_=game::NowMs()+250;
+    auditionEnds_[row]=game::NowMs()+250;
 }
 void View::Export(HWND owner) {
     try {
@@ -283,18 +307,44 @@ void View::Sidebar(bool locked) {
     ImGui::EndDisabled();
     ImGui::PopStyleVar(2);
 }
+void View::Scrollbar(bool input,float width,float keyWidth) {
+    const auto& io=ImGui::GetIO();float span=std::max(1.f,project.beats/zoom_),maxPan=std::max(0.f,project.beats-span);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX()+keyWidth);
+    float barWidth=std::max(1.f,width-keyWidth),barHeight=S(16);
+    ImGui::InvisibleButton("composer_horizontal_scrollbar",ImVec2(barWidth,barHeight));ui::Mark("composer_scrollbar");
+    auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();bool hovered=ImGui::IsItemHovered();
+    float thumbWidth=std::min(barWidth,std::max(S(24),barWidth*span/project.beats)),travel=barWidth-thumbWidth;
+    float thumbX=a.x+(maxPan>0 ? pan_/maxPan*travel:0);
+    if (input && hovered && ImGui::IsMouseClicked(0) && maxPan>0 && travel>0) {
+        scrollOffset_=io.MousePos.x>=thumbX && io.MousePos.x<=thumbX+thumbWidth ? io.MousePos.x-thumbX:thumbWidth*.5f;scrolling_=true;
+    }
+    if (scrolling_) {
+        if (!input || !ImGui::IsMouseDown(0) || maxPan<=0 || travel<=0) scrolling_=false;
+        else pan_=std::max(0.f,std::min(maxPan,(io.MousePos.x-a.x-scrollOffset_)/travel*maxPan));
+    }
+    thumbX=a.x+(maxPan>0 ? pan_/maxPan*travel:0);auto draw=ImGui::GetWindowDrawList();
+    draw->AddRectFilled(a,b,IM_COL32(25,33,42,255),S(5));
+    draw->AddRectFilled(ImVec2(thumbX,a.y+S(2)),ImVec2(thumbX+thumbWidth,b.y-S(2)),maxPan<=0 ? IM_COL32(55,67,79,255):scrolling_ ? IM_COL32(97,151,189,255):hovered ? IM_COL32(82,120,151,255):IM_COL32(66,91,114,255),S(4));
+    if (hovered) ImGui::SetTooltip("横向滚动时间轴 · %.2f–%.2f 拍\n也可按住空格，用鼠标拖动时间轴",pan_,pan_+span);
+}
 void View::Grid(const app::Status& status,bool focused,bool locked) {
     const auto& io=ImGui::GetIO();float span=project.beats/zoom_;span=std::max(1.f,span);pan_=std::max(0.f,std::min(float(project.beats)-span,pan_));
-    ImGui::BeginChild("composer_roll",ImVec2(0,0),ImGuiChildFlags_Borders,ImGuiWindowFlags_AlwaysVerticalScrollbar|((io.KeyCtrl || io.KeyShift) ? ImGuiWindowFlags_NoScrollWithMouse:0));
+    ImGui::BeginChild("composer_roll",ImVec2(0,0),ImGuiChildFlags_Borders,ImGuiWindowFlags_NoNavInputs|ImGuiWindowFlags_AlwaysVerticalScrollbar|((io.KeyCtrl || io.KeyShift) ? ImGuiWindowFlags_NoScrollWithMouse:0));
     auto origin=ImGui::GetCursorScreenPos();float width=ImGui::GetContentRegionAvail().x,keyWidth=S(100),rulerHeight=S(30);
-    float rowHeight=std::max(S(14),std::min(S(24),(ImGui::GetContentRegionAvail().y-rulerHeight)/21));
+    float rowHeight=std::max(S(14),std::min(S(24),(ImGui::GetContentRegionAvail().y-rulerHeight-S(16)-ImGui::GetStyle().ItemSpacing.y)/21));
     float left=origin.x+keyWidth,right=origin.x+width,top=origin.y+rulerHeight,bottom=top+21*rowHeight;
     float beatWidth=std::max(1.f,(right-left)/span);auto draw=ImGui::GetWindowDrawList();
     ImGui::InvisibleButton("composer_canvas",ImVec2(width,rulerHeight+21*rowHeight),ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonRight);ui::Mark("composer_grid");
     bool hovered=ImGui::IsItemHovered();ui::MarkRect("composer_ruler",ImVec2(left,origin.y),ImVec2(right,top));
     bool transportInput=focused && !io.AppFocusLost && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);
+    bool panMode=transportInput && !io.WantTextInput && ImGui::IsKeyDown(ImGuiKey_Space) && !dragging_ && !seeking_;
+    if (panMode && hovered && ImGui::IsMouseClicked(0)) {panning_=true;panMouseX_=io.MousePos.x;panAnchor_=pan_;}
+    if (panning_) {
+        if (!panMode || !ImGui::IsMouseDown(0)) panning_=false;
+        else pan_=std::max(0.f,std::min(float(project.beats)-span,panAnchor_-(io.MousePos.x-panMouseX_)/beatWidth));
+    }
     bool rulerHovered=hovered && io.MousePos.x>=left && io.MousePos.y<top;
-    if (transportInput && rulerHovered && !dragging_ && ImGui::IsMouseClicked(0)) {if (recording_) {ReleaseRecordingVoices();gameVoices_.clear();app::SetGameInputCapture(receiveGame_);}seeking_=true;}
+    if (transportInput && rulerHovered && !dragging_ && !panMode && ImGui::IsMouseClicked(0)) {if (recording_) {ReleaseRecordingVoices();gameVoices_.clear();app::SetGameInputCapture(receiveGame_);}seeking_=true;}
     if (seeking_) {
         if (!transportInput) seeking_=false;
         else {
@@ -307,7 +357,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     draw->AddRectFilled(origin,ImVec2(right,bottom),IM_COL32(20,26,33,255));
     for (int row=0;row<21;++row) {
         float y=top+row*rowHeight;draw->AddRectFilled(ImVec2(origin.x,y),ImVec2(right,y+rowHeight),(row/7)%2 ? IM_COL32(26,34,43,255):IM_COL32(23,29,38,255));
-        draw->AddRectFilled(ImVec2(origin.x,y),ImVec2(left,y+rowHeight),row==audition_ || recordVoices_[row].note ? IM_COL32(53,104,113,255):IM_COL32(34,44,54,255));
+        draw->AddRectFilled(ImVec2(origin.x,y),ImVec2(left,y+rowHeight),auditionEnds_[row]>0 || recordVoices_[row].note ? IM_COL32(53,104,113,255):IM_COL32(34,44,54,255));
         if (row==13) ui::MarkRect("composer_piano",ImVec2(origin.x,y),ImVec2(left,y+rowHeight));
         char label[64];sprintf_s(label,"%c  %s",notepalette::RowKey(row),notepalette::RowLabel(row));
         draw->AddText(ImGui::GetFont(),std::min(ImGui::GetFontSize(),rowHeight-S(2)),ImVec2(origin.x+S(6),y+S(1)),IM_COL32(180,199,213,255),label);draw->AddLine(ImVec2(origin.x,y+rowHeight),ImVec2(right,y+rowHeight),IM_COL32(44,53,63,255));
@@ -342,11 +392,11 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     }
     draw->PopClipRect();
     if (recording_) {
-        if (transportInput && hovered && ImGui::IsMouseClicked(0) && io.MousePos.x<left && io.MousePos.y>=top && io.MousePos.y<bottom) recordMouseRow_=int((io.MousePos.y-top)/rowHeight);
+        if (transportInput && !panMode && hovered && ImGui::IsMouseClicked(0) && io.MousePos.x<left && io.MousePos.y>=top && io.MousePos.y<bottom) recordMouseRow_=int((io.MousePos.y-top)/rowHeight);
         if (!ImGui::IsMouseDown(0)) recordMouseRow_=-1;
-        RecordInput(status,transportInput);
+        RecordInput(status,transportInput && !panMode);
     }
-    bool input=transportInput && !locked && !seeking_;int row=int((io.MousePos.y-top)/rowHeight);
+    bool input=transportInput && !locked && !seeking_ && !panMode && !scrolling_;int row=int((io.MousePos.y-top)/rowHeight);
     if (hit && hovered) {
         const composition::Note* n=nullptr;for (const auto& item:project.tracks[hitTrack].notes) if (item.id==hit) n=&item;
         if (n) ImGui::SetTooltip("%s · %c / %s\n开始 %.2f 拍 · 时长 %.2f 拍 · 力度 %d\nCtrl 点选增减多选 · 拖动移动 · 单选拖右边缘改时长 · 右键删除",project.tracks[hitTrack].name.c_str(),notepalette::RowKey(n->row),notepalette::RowLabel(n->row),n->start/double(composition::PPQ),n->length/double(composition::PPQ),n->velocity);
@@ -388,11 +438,16 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
         }
         if (!input || !ImGui::IsMouseDown(0)) {dragging_=false;if (deselectOnRelease_ && input) {selection_.erase(note_);FocusSelection();}if (dragRemembered_) Save();}
     }
-    if (audition_>=0 && (!input || game::NowMs()>=auditionEnd_)) StopAudition();
+    if (!recording_) KeyboardInput(status,input && !dragging_);
+    if (!input) StopAudition();else for (int i=0;i<notepalette::Count;++i) if (auditionEnds_[i]>0 && game::NowMs()>=auditionEnds_[i]) {
+        app::Command off;off.action=app::Action::ManualOff;off.slot=i;if (app::Send(off)) auditionEnds_[i]=0;
+    }
     if (transportInput && hovered && io.MouseWheel!=0 && !dragging_ && !seeking_) {
         if (io.KeyCtrl) {float anchor=std::max(0.f,std::min(1.f,(io.MousePos.x-left)/(right-left))),at=pan_+anchor*span;zoom_=std::max(1.f,std::min(32.f,zoom_*float(std::pow(1.25,io.MouseWheel))));pan_=at-anchor*std::max(1.f,project.beats/zoom_);}
         else if (io.KeyShift) pan_-=io.MouseWheel*span*.1f;
     }
+    if (panMode && hovered) {ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);ImGui::SetTooltip("按住空格 + 鼠标左键拖动，横向平移时间轴");}
+    Scrollbar(transportInput && !dragging_ && !seeking_ && !panning_,width,keyWidth);
     ImGui::EndChild();
 }
 void View::Draw(const app::Status& status,HWND owner,float height,bool focused) {
@@ -420,21 +475,22 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
     if (!project.tempoChanges.empty() || !project.beatTimes.empty()) {ImGui::SameLine();ImGui::BeginDisabled(locked);if (ImGui::Button("统一拍长")) {Remember();project.tempoChanges.clear();project.beatTimes.clear();Save();}ImGui::EndDisabled();}
     ImGui::SameLine();ImGui::TextDisabled("位置 %s",ui::Time(project.Time(positionBeat_),true).c_str());
     if (recording_) {ImGui::SameLine();ImGui::TextColored(ImVec4(1,.8f,.4f,1),receiveGame_ ? "录入中 · 游戏 + 插件键盘":"录入中 · 插件键盘");}
+    else if (!locked) {ImGui::SameLine();ImGui::TextDisabled("三排键盘录入 · 空格 + 拖动平移");}
     ImGui::TextDisabled("%u 轨 · %u 音符 · %s · 点击添加 / 拖动移动 / 拖右边缘改时长 / 右键删除",unsigned(project.tracks.size()),unsigned(project.NoteCount()),ui::Time(project.Time(project.beats)).c_str());
     if (!error_.empty()) ImGui::TextColored(ImVec4(1,.5f,.45f,1),"%s",error_.c_str());else if (!notice_.empty()) ImGui::TextWrapped("%s",notice_.c_str());
     if (!status.manualError.empty()) ImGui::TextColored(ImVec4(1,.5f,.45f,1),"试听：%s",ui::Utf8(ui::Widen(status.manualError)).c_str());
     if (status.transport.state==player::State::Countdown) ImGui::TextColored(ImVec4(1,.8f,.45f,1),"倒计时 %.1f 秒 · 请切回游戏演奏界面",status.transport.countdownMs/1000.);
     else if (status.transport.state==player::State::Error) ImGui::TextColored(ImVec4(1,.5f,.45f,1),"演奏失败：%s",ui::Utf8(ui::Widen(status.transport.error)).c_str());
-    if (recording_ && !seeking_ && (positionBeat_<pan_ || positionBeat_>pan_+span*.9f)) pan_=std::max(0.f,std::min(maxPan,float(positionBeat_)-span*.15f));
+    if (recording_ && !seeking_ && !panning_ && !scrolling_ && (positionBeat_<pan_ || positionBeat_>pan_+span*.9f)) pan_=std::max(0.f,std::min(maxPan,float(positionBeat_)-span*.15f));
     if (ImGui::BeginTable("composer_layout",2,ImGuiTableFlags_Resizable)) {
         ImGui::TableSetupColumn("tracks",ImGuiTableColumnFlags_WidthFixed,S(245));ImGui::TableSetupColumn("roll",ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableNextColumn();float body=std::max(S(220),ImGui::GetContentRegionAvail().y);ImGui::BeginChild("composer_sidebar",ImVec2(0,body));Sidebar(locked);ImGui::EndChild();
         ImGui::TableNextColumn();ImGui::BeginChild("composer_grid_holder",ImVec2(0,body));Grid(status,focused,locked);ImGui::EndChild();ImGui::EndTable();
     }
-    if (focused && !locked && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && ImGui::GetIO().KeyCtrl && !dragging_ && !seeking_) {
+    if (focused && !locked && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && ImGui::GetIO().KeyCtrl && !dragging_ && !seeking_ && !panning_ && !scrolling_) {
         if (ImGui::IsKeyPressed(ImGuiKey_Z,false)) Undo(ImGui::GetIO().KeyShift);else if (ImGui::IsKeyPressed(ImGuiKey_Y,false)) Undo(true);
     }
-    if (focused && !locked && !ImGui::GetIO().AppFocusLost && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && !dragging_ && !seeking_ && ImGui::IsKeyPressed(ImGuiKey_Delete,false)) Remove();
+    if (focused && !locked && !ImGui::GetIO().AppFocusLost && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && !dragging_ && !seeking_ && !panning_ && !scrolling_ && ImGui::IsKeyPressed(ImGuiKey_Delete,false)) Remove();
     ImGui::EndChild();
 }
 void View::Demo(bool record) {

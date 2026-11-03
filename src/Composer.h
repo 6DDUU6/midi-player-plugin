@@ -23,9 +23,9 @@ public:
     int NewNoteLength() const {return newLength_;}
     bool OpenMidi(const std::wstring& path);
 private:
-    int selected_=0,snap_=2,newLength_=composition::PPQ,velocity_=100,audition_=-1;
+    int selected_=0,snap_=2,newLength_=composition::PPQ,velocity_=100;
     int inspectorRequest_=0;
-    double auditionEnd_=0;
+    std::array<double,21> auditionEnds_{};
     unsigned note_=0;
     std::set<unsigned> selection_;
     float zoom_=2,pan_=0;
@@ -34,6 +34,8 @@ private:
     bool dragRemembered_=false,deselectOnRelease_=false;
     int dragFirstTick_=0,dragEndTick_=0,dragLowRow_=0,dragHighRow_=0,dragTick_=0,dragRow_=0;
     bool seeking_=false,transportLoaded_=false;
+    bool panning_=false,scrolling_=false;
+    float panMouseX_=0,panAnchor_=0,scrollOffset_=0;
     double positionBeat_=0;
     struct RecordVoice {unsigned note;int track;RecordVoice(unsigned n=0,int t=0):note(n),track(t) {}};
     std::array<RecordVoice,21> recordVoices_{};
@@ -68,12 +70,14 @@ private:
     void UpdateRecording();
     void ReleaseRecordingVoices();
     void RecordInput(const app::Status& status,bool input);
+    void KeyboardInput(const app::Status& status,bool input);
     void RecordGameInput();
     unsigned AddRecordedNote(int row,int start,int length);
     void ExtendRecordedNote(const RecordVoice& voice,int endTick);
-    void Audition(const app::Status& status,int row);
+    void Audition(const app::Status& status,int row,bool chord=false);
     void StopAudition();
     void Sidebar(bool locked);
     void Grid(const app::Status& status,bool focused,bool locked);
+    void Scrollbar(bool input,float width,float keyWidth);
 };
 }
