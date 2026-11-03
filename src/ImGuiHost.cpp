@@ -153,10 +153,10 @@ void Mark(const char* name) {
     testTargets[name]={a,b};
 }
 void MarkRect(const char* name,const ImVec2& min,const ImVec2& max) {if (testInput) testTargets[name]={min,max};}
-bool TestMouse(const char* name,bool down,float fraction,float vertical) {
+bool TestMouse(const char* name,bool down,float fraction,float vertical,bool control) {
     if (!testInput) return false;auto item=testTargets.find(name);if (item==testTargets.end()) return false;
     const auto& bounds=item->second;auto& io=ImGui::GetIO();
-    io.AddMousePosEvent(bounds.min.x+(bounds.max.x-bounds.min.x)*fraction,bounds.min.y+(bounds.max.y-bounds.min.y)*vertical);io.AddMouseButtonEvent(0,down);return true;
+    io.AddMousePosEvent(bounds.min.x+(bounds.max.x-bounds.min.x)*fraction,bounds.min.y+(bounds.max.y-bounds.min.y)*vertical);io.AddKeyEvent(ImGuiMod_Ctrl,control);io.AddMouseButtonEvent(0,down);return true;
 }
 bool TestWheel(const char* name,bool control,float delta) {
     if (!testInput) return false;auto item=testTargets.find(name);if (item==testTargets.end()) return false;
@@ -164,4 +164,5 @@ bool TestWheel(const char* name,bool control,float delta) {
     io.AddMousePosEvent((bounds.min.x+bounds.max.x)*.5f,(bounds.min.y+bounds.max.y)*.5f);
     io.AddKeyEvent(ImGuiMod_Ctrl,control);if (delta) io.AddMouseWheelEvent(0,delta);return true;
 }
+bool TestKey(ImGuiKey key,bool down) {if (!testInput) return false;ImGui::GetIO().AddKeyEvent(key,down);return true;}
 }

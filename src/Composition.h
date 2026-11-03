@@ -1,6 +1,7 @@
 #pragma once
 #include "Midi.h"
 #include <map>
+#include <set>
 
 namespace composition {
 constexpr int PPQ=960,MaxTracks=128,MaxBeats=4096;
@@ -28,6 +29,7 @@ struct Project {
     int AddTrack();
     unsigned AddNote(int track,int row,int start,int length,int velocity=100);
     bool Place(int track,const Note& note) const;
+    bool MoveNotes(const std::set<unsigned>& ids,int tickDelta,int rowDelta);
     size_t NoteCount() const;
     double BeatDuration(int beat) const;
     double BaseTempo(int tick) const;

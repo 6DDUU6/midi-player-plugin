@@ -51,6 +51,23 @@ bool Project::Place(int track,const Note& note) const {
         note.start<other.start+other.length && other.start<note.start+note.length) return false;
     return true;
 }
+bool Project::MoveNotes(const std::set<unsigned>& ids,int tickDelta,int rowDelta) {
+    if (ids.empty()) return false;
+    struct Move {Note* target;Note value;};std::vector<Move> moves;
+    for (auto& track:tracks) {
+        if (std::none_of(track.notes.begin(),track.notes.end(),[&](const Note& n) {return ids.count(n.id)!=0;})) continue;
+        auto placed=track.notes;
+        for (size_t i=0;i<placed.size();++i) if (ids.count(placed[i].id)) {
+            auto& n=placed[i];int64_t start=int64_t(n.start)+tickDelta,row=int64_t(n.row)+rowDelta;
+            if (start<0 || start>beats*PPQ-n.length || row<0 || row>=notepalette::Count) return false;
+            n.start=int(start);n.row=int(row);moves.push_back({&track.notes[i],n});
+        }
+        std::sort(placed.begin(),placed.end(),[](const Note& a,const Note& b) {return a.row!=b.row ? a.row<b.row:a.start<b.start;});
+        for (size_t i=1;i<placed.size();++i) if (placed[i].row==placed[i-1].row && placed[i].start<placed[i-1].start+placed[i-1].length) return false;
+    }
+    if (moves.size()!=ids.size()) return false;
+    for (const auto& move:moves) *move.target=move.value;return true;
+}
 unsigned Project::AddNote(int track,int row,int start,int length,int velocity) {
     if (NoteCount()>=200000) throw std::runtime_error("创作音符数量已达上限。");
     Note note;note.id=nextId;note.row=row;note.start=start;note.length=length;note.velocity=velocity;

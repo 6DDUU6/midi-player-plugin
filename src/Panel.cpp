@@ -101,7 +101,7 @@ bool Select(int i) {
 bool Submit(app::Command command) {
     if (app::Send(command)) return true;error="命令队列已满，请等待游戏主线程处理。";return false;
 }
-void Stop() {app::Command c;c.action=app::Action::Stop;Submit(c);}
+void Stop() {app::Command c;c.action=app::Action::Stop;if (Submit(c)) composerView.ResetPlayback();}
 void Pause() {app::Command c;c.action=app::Action::Pause;Submit(c);}
 void LoadFile(const std::wstring& target) {
     if (loading || editor.open || !Commit()) return;
@@ -361,10 +361,14 @@ bool SmokeChecks() {
 }
 struct SmokeStep {
     const char* target;std::function<bool()> verify;float x,y,endX,endY,wheel;
-    SmokeStep(const char* t,std::function<bool()> v,float a=.5f,float b=.5f,float c=-1,float d=-1,float w=0):target(t),verify(v),x(a),y(b),endX(c),endY(d),wheel(w) {}
+    bool control;
+    SmokeStep(const char* t,std::function<bool()> v,float a=.5f,float b=.5f,float c=-1,float d=-1,float w=0,bool ctrl=false):target(t),verify(v),x(a),y(b),endX(c),endY(d),wheel(w),control(ctrl) {}
 };
 std::vector<SmokeStep> smokeSteps;
 size_t smokeStep=0;
+double composerSeekPosition=0;
+size_t composerRecordingBase=0;
+std::vector<composition::Note> composerGroupBefore;
 void SmokeReport(const std::string& message) {
     std::ofstream out(directory+L"MidiPlayer.ui-smoke.log",std::ios::app);out<<message<<"\n";
 }
@@ -405,6 +409,7 @@ void PrepareSmoke() {
         {"play",[] {return app::GetStatus().transport.state==player::State::Playing && app::GetStatus().transport.positionMs>song->durationMs*.74;}},
         {"stop",[] {composerView.project=composition::Project{};return app::GetStatus().transport.state==player::State::Stopped;}},
         {"mode_composer",[] {return compositionView && !manualView;}},
+        {"composer_ruler",[] {return app::GetStatus().transport.state==player::State::Stopped && std::abs(composerView.PositionBeat()-4)<.05;},.25f},
         {"composer_grid",[] {return composerView.project.NoteCount()==1;},.3f},
         {"composer_note",[] {const auto& n=composerView.project.tracks[0].notes[0];return n.row==8 && n.start>0;},.25f,.5f,1.25f,-1.2f},
         {"composer_note",[] {return composerView.project.tracks[0].notes[0].length>composition::PPQ;},.95f,.5f,1.95f,.5f},
@@ -420,10 +425,39 @@ void PrepareSmoke() {
         {"composer_delete_note",[] {return composerView.project.NoteCount()==1;}},
         {"composer_undo",[] {return composerView.project.NoteCount()==2;}},
         {"composer_grid",[] {return composerView.Zoom()>2;},.5f,.5f,-1,-1,1},
-        {"composer_play",[] {return app::GetStatus().transport.state==player::State::Playing;}},
+        {"composer_ruler",[] {composerSeekPosition=composerView.project.Time(composerView.PositionBeat());return composerSeekPosition>1000 && app::GetStatus().transport.state==player::State::Stopped;},.5f},
+        {"composer_play",[] {auto t=app::GetStatus().transport;return t.state==player::State::Playing && t.positionMs>=composerSeekPosition && t.positionMs<composerSeekPosition+250;}},
         {"composer_grid",[] {return composerView.Zoom()>3 && app::GetStatus().transport.state==player::State::Playing;},.5f,.5f,-1,-1,1},
-        {"composer_stop",[] {return app::GetStatus().transport.state==player::State::Stopped && composerView.OpenMidi(directory+L"..\\examples\\飞鼠plus.mid") && composerView.project.tracks.size()==6 && composerView.project.NoteCount()>0;}},
+        {"composer_ruler",[] {auto t=app::GetStatus().transport;return t.state==player::State::Playing && t.positionMs<composerSeekPosition-500;},.05f,.5f,.1f,.5f},
+        {"composer_play",[] {return app::GetStatus().transport.state==player::State::Paused;}},
+        {"composer_ruler",[] {auto t=app::GetStatus().transport;composerSeekPosition=t.positionMs;return t.state==player::State::Paused && t.positionMs>3000;},.6f,.5f,.7f,.5f},
+        {"composer_play",[] {auto t=app::GetStatus().transport;return t.state==player::State::Playing && t.positionMs>=composerSeekPosition;}},
+        {"composer_stop",[] {return app::GetStatus().transport.state==player::State::Stopped && composerView.PositionBeat()==0 && composerView.OpenMidi(directory+L"..\\examples\\飞鼠plus.mid") && composerView.project.tracks.size()==6 && composerView.project.NoteCount()>0;}},
         {"composer_undo",[] {return composerView.project.tracks.size()==2 && composerView.project.NoteCount()==2;}},
+        {"composer_first_note",[] {return composerView.SelectionCount()==1;}},
+        {"composer_other_note",[] {composerGroupBefore={composerView.project.tracks[0].notes[0],composerView.project.tracks[1].notes[0]};return composerView.SelectionCount()==2;},.5f,.5f,-1,-1,0,true},
+        {"composer_note",[] {const auto& p=composerView.project;int ticks=p.tracks[0].notes[0].start-composerGroupBefore[0].start,rowDelta=p.tracks[0].notes[0].row-composerGroupBefore[0].row;return ticks>0 && rowDelta<0 && p.tracks[1].notes[0].start-composerGroupBefore[1].start==ticks && p.tracks[1].notes[0].row-composerGroupBefore[1].row==rowDelta && p.tracks[0].notes[0].length==composerGroupBefore[0].length && p.tracks[1].notes[0].length==composerGroupBefore[1].length;},.25f,.5f,1.25f,-1.2f},
+        {"composer_undo",[] {return composerView.project.tracks[0].notes[0].start==composerGroupBefore[0].start && composerView.project.tracks[1].notes[0].row==composerGroupBefore[1].row;}},
+        {"composer_first_note",[] {return composerView.SelectionCount()==1;},.5f,.5f,-1,-1,0,true},
+        {"composer_other_note",[] {return composerView.SelectionCount()==2;},.5f,.5f,-1,-1,0,true},
+        {"composer_first_note",[] {return composerView.SelectionCount()==1;},.5f,.5f,-1,-1,0,true},
+        {"composer_delete_note",[] {return composerView.project.NoteCount()==1;}},
+        {"composer_undo",[] {return composerView.project.NoteCount()==2;}},
+        {"instrument_presets",[] {return compositionView;}},
+        {"preset_11",[] {return composerView.project.tracks[composerView.SelectedTrack()].instrument==11;}},
+        {"composer_ruler",[] {composerSeekPosition=composerView.project.Time(composerView.PositionBeat());return composerSeekPosition>0;},.1f},
+        {"composer_record",[] {composerRecordingBase=composerView.project.NoteCount();return composerView.Recording();}},
+        {"composer_record_keys",[] {const auto& p=composerView.project;size_t count=0;for (const auto& n:p.tracks[composerView.SelectedTrack()].notes) if ((n.row==6 || n.row==13) && n.length>1 && p.Time(n.start/double(composition::PPQ))>=composerSeekPosition) ++count;return composerView.Recording() && p.NoteCount()==composerRecordingBase+2 && count==2 && app::GetStatus().manualVoices==0;}},
+        {"composer_piano",[] {return composerView.Recording() && composerView.project.NoteCount()==composerRecordingBase+3;},.5f,.5f,.5f,.5f},
+        {"composer_ruler",[] {return composerView.Recording() && composerView.PositionBeat()>12;},.4f,.5f,.45f,.5f},
+        {"composer_record",[] {return !composerView.Recording() && composerView.project.Time(composerView.PositionBeat())>composerSeekPosition && app::GetStatus().manualVoices==0;}},
+        {"composer_undo",[] {return composerView.project.NoteCount()==composerRecordingBase;}},
+        {"composer_ruler",[] {return composerView.PositionBeat()<4;},.1f},
+        {"composer_record",[] {return composerView.Recording();}},
+        {"composer_record_held_keys",[] {bool ok=composerView.Recording() && app::GetStatus().manualVoices==2;composerView.Release();app::PreviewTick();ui::TestKey(ImGuiKey_Q,false);ui::TestKey(ImGuiKey_A,false);return ok && !composerView.Recording() && app::GetStatus().manualVoices==0;}},
+        {"composer_undo",[] {return composerView.project.NoteCount()==composerRecordingBase;}},
+        {"composer_ruler",[] {return composerView.PositionBeat()>31;},.9999f},
+        {"composer_record",[] {return !composerView.Recording() && composerView.PositionBeat()==composerView.project.beats && app::GetStatus().manualVoices==0;}},
         {"mode_auto",[] {return !compositionView && !manualView && dirty;}}
     };
 }
@@ -435,12 +469,13 @@ std::wstring Automation() {
     }
     if (smokeMode) {
         if (!automationPhase) return L"";auto& step=smokeSteps[smokeStep];
-        bool ruler=std::string(step.target)=="timeline_ruler";
+        bool ruler=std::string(step.target)=="timeline_ruler",recordHeld=std::string(step.target)=="composer_record_held_keys",recordKeys=recordHeld || std::string(step.target)=="composer_record_keys";
         if (step.wheel && (automationFrames==4 || automationFrames==5)) SmokeReport("Wheel: ctrl="+std::to_string(ImGui::GetIO().KeyCtrl)+" delta="+std::to_string(ImGui::GetIO().MouseWheel)+" zoom="+std::to_string(composerView.Zoom()));
-        if (automationFrames==3 && !(step.wheel ? ui::TestWheel(step.target,true,step.wheel):ui::TestMouse(step.target,true,ruler ? .25f:step.x,step.y))) {SmokeReport(std::string("FAIL: missing widget ")+step.target);resultCode=4;running=false;}
-        if (automationFrames==4) {if (step.wheel) ui::TestWheel(step.target,true,0);else ui::TestMouse(step.target,step.endX>=0,ruler ? .75f:step.endX>=0 ? step.endX:step.x,step.endX>=0 ? step.endY:step.y);}
+        if (automationFrames==3 && !(recordKeys ? (ui::TestKey(ImGuiKey_Q,true) && ui::TestKey(ImGuiKey_A,true)):step.wheel ? ui::TestWheel(step.target,true,step.wheel):ui::TestMouse(step.target,true,ruler ? .25f:step.x,step.y,step.control))) {SmokeReport(std::string("FAIL: missing widget ")+step.target);resultCode=4;running=false;}
+        if (automationFrames==4 && !recordKeys) {if (step.wheel) ui::TestWheel(step.target,true,0);else ui::TestMouse(step.target,step.endX>=0,ruler ? .75f:step.endX>=0 ? step.endX:step.x,step.endX>=0 ? step.endY:step.y,step.control);}
         if (automationFrames==6 && step.wheel) ui::TestWheel(step.target,false,0);
-        if (automationFrames==5 && step.endX>=0) ui::TestMouse(step.target,false,step.endX,step.endY);
+        if (automationFrames==5 && recordKeys && !recordHeld) {ui::TestKey(ImGuiKey_Q,false);ui::TestKey(ImGuiKey_A,false);}
+        if (automationFrames==5 && step.endX>=0) ui::TestMouse(step.target,false,step.endX,step.endY,step.control);
         if (automationFrames==8) {
             bool ok=step.verify();SmokeReport(std::string(ok ? "PASS: click ":"FAIL: click ")+step.target);
             if (!ok) {resultCode=5;running=false;}
@@ -448,7 +483,7 @@ std::wstring Automation() {
             automationFrames=0;
         }return L"";
     }
-    if (automationFrames!=5) return L"";const wchar_t* names[]={L"panel_preview.bmp",L"panel_manual_log_preview.bmp",L"instrument_config_preview.bmp",L"track_notes_preview.bmp",L"panel_compact_preview.bmp",L"panel_table_preview.bmp",L"panel_playing_preview.bmp",L"composer_preview.bmp",L"composer_compact_preview.bmp"};return directory+names[automationPhase];
+    if (automationFrames!=5) return L"";const wchar_t* names[]={L"panel_preview.bmp",L"panel_manual_log_preview.bmp",L"instrument_config_preview.bmp",L"track_notes_preview.bmp",L"panel_compact_preview.bmp",L"panel_table_preview.bmp",L"panel_playing_preview.bmp",L"composer_preview.bmp",L"composer_compact_preview.bmp",L"composer_recording_compact_preview.bmp",L"composer_recording_preview.bmp"};return directory+names[automationPhase];
 }
 void AfterFrame() {
     if (!snapshotMode || !song || automationFrames!=5) return;++automationPhase;automationFrames=0;
@@ -460,6 +495,8 @@ void AfterFrame() {
     else if (automationPhase==6) {tableView=false;delay=0;StartPlayback();app::PreviewTick();Seek(30000);timelineView.viewport.Zoom(3,0);timelineView.Reveal(selected);}
     else if (automationPhase==7) {Stop();app::PreviewTick();compositionView=true;composerView.Demo();}
     else if (automationPhase==8) {RECT rect{0,0,1080,720};AdjustWindowRect(&rect,WS_OVERLAPPEDWINDOW,FALSE);SetWindowPos(window,nullptr,0,0,rect.right-rect.left,rect.bottom-rect.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);}
+    else if (automationPhase==9) composerView.Demo(true);
+    else if (automationPhase==10) {RECT rect{0,0,1380,840};AdjustWindowRect(&rect,WS_OVERLAPPEDWINDOW,FALSE);SetWindowPos(window,nullptr,0,0,rect.right-rect.left,rect.bottom-rect.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);}
     else running=false;
 }
 bool HotkeysAllowed(HWND hwnd) {HWND front=GetForegroundWindow();wchar_t cls[128]{};GetClassNameW(front,cls,128);return front==hwnd || GetWindow(front,GW_OWNER)==hwnd || wcscmp(cls,L"UnityWndClass")==0;}

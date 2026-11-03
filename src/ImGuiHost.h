@@ -20,6 +20,7 @@ void Muted(const char* text);
 void EnableTestInput(bool enabled);
 void Mark(const char* name);
 void MarkRect(const char* name,const ImVec2& min,const ImVec2& max);
-bool TestMouse(const char* name,bool down,float fraction=.5f,float vertical=.5f);
+bool TestMouse(const char* name,bool down,float fraction=.5f,float vertical=.5f,bool control=false);
 bool TestWheel(const char* name,bool control,float delta);
+bool TestKey(ImGuiKey key,bool down);
 }
