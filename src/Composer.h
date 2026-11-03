@@ -52,6 +52,8 @@ private:
     std::wstring draftPath_;
     std::string error_,notice_;
     std::vector<composition::Project> undo_,redo_;
+    struct ClipboardTrack {int offset;composition::Track track;};
+    std::vector<ClipboardTrack> clipboard_;
     void Select(int track,bool clear=true);
     void FocusSelection(unsigned preferred=0);
     void PruneSelection();
@@ -61,6 +63,8 @@ private:
     void Save();
     void Undo(bool redo);
     void Remove();
+    void Copy(bool cut);
+    void Paste();
     void Export(HWND owner);
     void Import(HWND owner);
     void Play(const app::Status& status);

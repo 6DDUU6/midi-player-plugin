@@ -65,6 +65,44 @@ void View::Remove() {
     for (auto& track:project.tracks) {auto& notes=track.notes;notes.erase(std::remove_if(notes.begin(),notes.end(),[&](const composition::Note& n) {return selection_.count(n.id)!=0;}),notes.end());}
     selection_.clear();note_=0;error_.clear();Save();
 }
+void View::Copy(bool cut) {
+    if (selection_.empty()) return;
+    try {
+        std::vector<ClipboardTrack> copied;int firstTrack=-1,firstTick=project.beats*composition::PPQ;size_t count=0;
+        for (size_t i=0;i<project.tracks.size();++i) {
+            auto track=project.tracks[i];auto& notes=track.notes;
+            notes.erase(std::remove_if(notes.begin(),notes.end(),[&](const composition::Note& n) {return !selection_.count(n.id);}),notes.end());
+            if (notes.empty()) continue;if (firstTrack<0) firstTrack=int(i);
+            for (const auto& n:notes) firstTick=std::min(firstTick,n.start);
+            count+=notes.size();copied.push_back({int(i)-firstTrack,std::move(track)});
+        }
+        if (copied.empty()) return;
+        for (auto& track:copied) for (auto& n:track.track.notes) {n.id=0;n.start-=firstTick;}
+        clipboard_=std::move(copied);error_.clear();if (cut) Remove();
+        notice_=std::string(cut ? "已剪切 ":"已复制 ")+std::to_string(count)+" 个音符 · 移动黄色指针后按 Ctrl+V 粘贴";
+    }catch (const std::exception& e) {error_=e.what();}
+}
+void View::Paste() {
+    if (clipboard_.empty()) {error_="请先选中音符并按 Ctrl+C 或 Ctrl+X。";return;}
+    try {
+        int firstTick=int(std::llround(positionBeat_*composition::PPQ)),lastTrack=selected_+clipboard_.back().offset;
+        if (lastTrack>=composition::MaxTracks) throw std::runtime_error("粘贴后音轨数将超过 128 条，请选择更靠前的目标音轨。");
+        auto pasted=project;size_t originalTracks=pasted.tracks.size();std::set<unsigned> selected;unsigned firstNote=0;
+        while (int(pasted.tracks.size())<=lastTrack) pasted.AddTrack();
+        for (const auto& source:clipboard_) {
+            int target=selected_+source.offset;
+            if (size_t(target)>=originalTracks) {auto id=pasted.tracks[target].id;pasted.tracks[target]=source.track;pasted.tracks[target].id=id;pasted.tracks[target].notes.clear();}
+            for (const auto& n:source.track.notes) {
+                int start=firstTick+n.start;
+                if (start>project.beats*composition::PPQ-n.length) throw std::runtime_error("粘贴音符将超出时间轴，整组未粘贴；请移动黄色指针或增加总拍数。");
+                auto id=pasted.AddNote(target,n.row,start,n.length,n.velocity);selected.insert(id);if (!firstNote) firstNote=id;
+            }
+            pasted.tracks[target].visible=true;
+        }
+        Remember();project=std::move(pasted);selection_=std::move(selected);FocusSelection(firstNote);
+        error_.clear();notice_="已粘贴 "+std::to_string(selection_.size())+" 个音符 · 可撤销整次粘贴";Save();
+    }catch (const std::exception& e) {error_=std::string("粘贴失败：")+e.what();}
+}
 void View::StopAudition() {
     if (std::any_of(auditionEnds_.begin(),auditionEnds_.end(),[](double end) {return end>0;})) {
         app::Command command;command.action=app::Action::ManualRelease;app::Send(command);auditionEnds_.fill(0);
@@ -399,7 +437,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     bool input=transportInput && !locked && !seeking_ && !panMode && !scrolling_;int row=int((io.MousePos.y-top)/rowHeight);
     if (hit && hovered) {
         const composition::Note* n=nullptr;for (const auto& item:project.tracks[hitTrack].notes) if (item.id==hit) n=&item;
-        if (n) ImGui::SetTooltip("%s · %c / %s\n开始 %.2f 拍 · 时长 %.2f 拍 · 力度 %d\nCtrl 点选增减多选 · 拖动移动 · 单选拖右边缘改时长 · 右键删除",project.tracks[hitTrack].name.c_str(),notepalette::RowKey(n->row),notepalette::RowLabel(n->row),n->start/double(composition::PPQ),n->length/double(composition::PPQ),n->velocity);
+        if (n) ImGui::SetTooltip("%s · %c / %s\n开始 %.2f 拍 · 时长 %.2f 拍 · 力度 %d\nCtrl 点选增减多选 · 拖动移动 · 单选拖右边缘改时长 · 右键删除\nCtrl+C 复制 · Ctrl+X 剪切 · Ctrl+V 粘贴到黄色指针",project.tracks[hitTrack].name.c_str(),notepalette::RowKey(n->row),notepalette::RowLabel(n->row),n->start/double(composition::PPQ),n->length/double(composition::PPQ),n->velocity);
         ImGui::SetMouseCursor(edge && !(selection_.size()>1 && selection_.count(hit)) ? ImGuiMouseCursor_ResizeEW:ImGuiMouseCursor_Hand);
     }
     if (input && hovered && ImGui::IsMouseClicked(1) && hit) {if (!selection_.count(hit)) {selection_.clear();selection_.insert(hit);}FocusSelection(hit);Remove();}
@@ -461,8 +499,10 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
         int end=0;for (const auto& t:project.tracks) for (const auto& n:t.notes) end=std::max(end,n.start+n.length);
         if (beats*composition::PPQ>=end) {Remember();project.beats=beats;for (auto it=project.beatTimes.begin();it!=project.beatTimes.end();) if (it->first>=beats) it=project.beatTimes.erase(it);else ++it;for (auto it=project.tempoChanges.begin();it!=project.tempoChanges.end();) if (it->first>=beats*composition::PPQ) it=project.tempoChanges.erase(it);else ++it;positionBeat_=std::min(positionBeat_,double(beats));Save();}else error_="总拍数不能小于现有音符的结束位置。";
     }
-    ImGui::SameLine();ImGui::SetNextItemWidth(S(100));float ms=float(project.beatMs);if (ImGui::InputFloat("每拍 / 毫秒",&ms,0,0,"%.1f") && std::isfinite(ms) && ms>=10 && ms<=16000) {Remember();project.beatMs=ms;Save();}
-    ImGui::SameLine();ImGui::TextDisabled("%.1f BPM",60000/project.beatMs);ImGui::SameLine();if (ImGui::Button("导入 MIDI…")) Import(owner);ui::Mark("composer_import");ImGui::EndDisabled();ImGui::SameLine();
+    ImGui::SameLine();ImGui::SetNextItemWidth(S(100));float ms=float(project.beatMs);if (ImGui::InputFloat("每拍 / 毫秒",&ms,0,0,"%.1f") && std::isfinite(ms) && ms>=10 && ms<=16000) {Remember();project.beatMs=ms;Save();}ui::Mark("composer_beat_ms");
+    ImGui::SameLine();ImGui::SetNextItemWidth(S(85));float bpm=float(60000/project.beatMs);if (ImGui::InputFloat("BPM",&bpm,0,0,"%.2f") && std::isfinite(bpm) && bpm>=3.75f && bpm<=6000) {Remember();project.beatMs=60000/double(bpm);Save();}ui::Mark("composer_bpm");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("每拍毫秒 = 60000 / BPM · 范围 3.75–6000\n设置默认拍长，原有速度变化仍保留；“统一拍长”可统一全曲");
+    ImGui::SameLine();if (ImGui::Button("导入 MIDI…")) Import(owner);ui::Mark("composer_import");ImGui::EndDisabled();ImGui::SameLine();
     if (ImGui::Button("导出 MIDI…")) Export(owner);ui::Mark("composer_export");
     ImGui::BeginDisabled(locked);const char* snaps[]={"1 拍","1/2 拍","1/4 拍","1/8 拍","1/16 拍"};ImGui::SetNextItemWidth(S(110));ImGui::Combo("网格",&snap_,snaps,5);
     ImGui::SameLine();ImGui::SetNextItemWidth(S(90));float newLength=newLength_/float(composition::PPQ);if (ImGui::InputFloat("新音时长 / 拍",&newLength,0,0,"%.3f") && std::isfinite(newLength) && newLength>0 && newLength<=composition::MaxBeats) newLength_=std::max(1,int(std::llround(newLength*composition::PPQ)));ImGui::SameLine();ImGui::SetNextItemWidth(S(65));ImGui::SliderInt("新音力度",&velocity_,1,127);ImGui::EndDisabled();
@@ -487,10 +527,16 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
         ImGui::TableNextColumn();float body=std::max(S(220),ImGui::GetContentRegionAvail().y);ImGui::BeginChild("composer_sidebar",ImVec2(0,body));Sidebar(locked);ImGui::EndChild();
         ImGui::TableNextColumn();ImGui::BeginChild("composer_grid_holder",ImVec2(0,body));Grid(status,focused,locked);ImGui::EndChild();ImGui::EndTable();
     }
-    if (focused && !locked && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && ImGui::GetIO().KeyCtrl && !dragging_ && !seeking_ && !panning_ && !scrolling_) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Z,false)) Undo(ImGui::GetIO().KeyShift);else if (ImGui::IsKeyPressed(ImGuiKey_Y,false)) Undo(true);
+    const auto& io=ImGui::GetIO();
+    bool editKeys=focused && !locked && !io.AppFocusLost && !io.WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && !dragging_ && !seeking_ && !panning_ && !scrolling_ && !ImGui::IsKeyDown(ImGuiKey_Space);
+    if (editKeys && io.KeyCtrl && !io.KeyAlt && !io.KeySuper) {
+        if (ImGui::IsKeyPressed(ImGuiKey_C,false)) Copy(false);
+        else if (ImGui::IsKeyPressed(ImGuiKey_X,false)) Copy(true);
+        else if (ImGui::IsKeyPressed(ImGuiKey_V,false)) Paste();
+        else if (ImGui::IsKeyPressed(ImGuiKey_Z,false)) Undo(io.KeyShift);
+        else if (ImGui::IsKeyPressed(ImGuiKey_Y,false)) Undo(true);
     }
-    if (focused && !locked && !ImGui::GetIO().AppFocusLost && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && !dragging_ && !seeking_ && !panning_ && !scrolling_ && ImGui::IsKeyPressed(ImGuiKey_Delete,false)) Remove();
+    if (editKeys && ImGui::IsKeyPressed(ImGuiKey_Delete,false)) Remove();
     ImGui::EndChild();
 }
 void View::Demo(bool record) {
