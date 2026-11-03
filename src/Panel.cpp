@@ -455,7 +455,7 @@ void PrepareSmoke() {
         {"preset_11",[] {return composerView.project.tracks[composerView.SelectedTrack()].instrument==11;}},
         {"composer_ruler",[] {composerSeekPosition=composerView.project.Time(composerView.PositionBeat());return composerSeekPosition>0;},.1f},
         {"composer_record",[] {composerRecordingBase=composerView.project.NoteCount();return composerView.Recording();}},
-        {"composer_record_keys",[] {const auto& p=composerView.project;size_t count=0;for (const auto& n:p.tracks[composerView.SelectedTrack()].notes) if ((n.row==6 || n.row==13) && n.length>1 && p.Time(n.start/double(composition::PPQ))>=composerSeekPosition) ++count;return composerView.Recording() && p.NoteCount()==composerRecordingBase+2 && count==2 && app::GetStatus().manualVoices==0;}},
+        {"composer_record_keys",[] {const auto& p=composerView.project;size_t count=0;for (const auto& n:p.tracks[composerView.SelectedTrack()].notes) if ((n.row==6 || n.row==13) && composition::IsNoteLength(n.length) && n.start%(composition::PPQ/4)==0 && p.Time(n.start/double(composition::PPQ))+p.beatMs/4>=composerSeekPosition) ++count;return composerView.Recording() && p.NoteCount()==composerRecordingBase+2 && count==2 && app::GetStatus().manualVoices==0;}},
         {"composer_piano",[] {return composerView.Recording() && composerView.project.NoteCount()==composerRecordingBase+3;},.5f,.5f,.5f,.5f},
         {"composer_ruler",[] {return composerView.Recording() && composerView.PositionBeat()>12;},.4f,.5f,.45f,.5f},
         {"composer_record",[] {return !composerView.Recording() && composerView.project.Time(composerView.PositionBeat())>composerSeekPosition && app::GetStatus().manualVoices==0;}},

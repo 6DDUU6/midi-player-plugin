@@ -13,6 +13,15 @@ namespace composer {
 namespace {
 float S(float v) {return ui::Scale(v);}
 bool Active(player::State state) {return state==player::State::Playing || state==player::State::Countdown || state==player::State::Paused;}
+const char* BeatLengths[]={"1 拍","1/2 拍","1/4 拍","1/8 拍","1/16 拍"};
+bool LengthInput(const char* label,int& ticks,const char* marker) {
+    float beats=ticks/float(composition::PPQ);
+    bool changed=ImGui::InputFloat(label,&beats,0,0,"%.4f");ui::Mark(marker);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("最小 1/16 拍（0.0625）· 四舍五入到最近的 1/16 拍倍数\n例如 1.0625、1.25、2.25 拍；新音符沿用上次音符长度");
+    if (!changed || !std::isfinite(beats) || beats<=0 || beats>composition::MaxBeats) return false;
+    int quantized=composition::QuantizeLength(double(beats)*composition::PPQ);
+    if (quantized==ticks) return false;ticks=quantized;return true;
+}
 ImU32 Color(const composition::Track& t,int alpha=255) {return ImGui::ColorConvertFloat4ToU32(ImVec4(t.color[0],t.color[1],t.color[2],alpha/255.f));}
 void Write(const std::wstring& path,const std::vector<uint8_t>& bytes) {
     auto temp=path+L".tmp."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(GetTickCount64());
@@ -35,7 +44,7 @@ composition::Note* View::Note() {if (selected_<0 || selected_>=int(project.track
 void View::FocusSelection(unsigned preferred) {
     note_=0;
     for (size_t i=0;i<project.tracks.size();++i) for (const auto& n:project.tracks[i].notes) if (selection_.count(n.id) && (!preferred || n.id==preferred)) {
-        Select(int(i),false);note_=n.id;newLength_=n.length;inspectorRequest_=1;return;
+        Select(int(i),false);note_=n.id;newLength_=composition::QuantizeLength(n.length);inspectorRequest_=1;return;
     }
 }
 void View::PruneSelection() {
@@ -74,7 +83,7 @@ composition::EditorSettings View::Settings() const {
     }return e;
 }
 void View::Restore(composition::Project loaded,const composition::EditorSettings& e) {
-    project=std::move(loaded);Select(e.selectedTrack);snap_=e.snap;newLength_=e.newLength;velocity_=e.velocity;zoom_=e.zoom;pan_=e.pan;positionBeat_=e.positionBeat;
+    project=std::move(loaded);Select(e.selectedTrack);snap_=e.snap;newLength_=composition::QuantizeLength(e.newLength);velocity_=e.velocity;zoom_=e.zoom;pan_=e.pan;positionBeat_=e.positionBeat;
     receiveGame_=e.receiveGame;note_=e.activeNote;selection_=e.selection;inspectorTab_=inspectorRequest_=e.inspectorTab;moreSettings_=e.moreSettings;
     sidebarWidth_=e.sidebarWidth;drawnSidebarWidth_=0;trackScroll_=e.trackScroll;restoreScrollFrames_=2;++layoutRevision_;
     dragging_=resizing_=dragRemembered_=deselectOnRelease_=seeking_=panning_=scrolling_=transportLoaded_=boxSelecting_=boxDragged_=false;boxSelection_.clear();
@@ -169,17 +178,18 @@ void View::StartRecording() {
     recordHeld_.fill(false);recordVoices_.fill(RecordVoice{});recordStartMs_=project.Time(positionBeat_);recordClock_=game::NowMs();error_.clear();notice_.clear();
     app::SetGameInputCapture(receiveGame_);
 }
-void View::ExtendRecordedNote(const RecordVoice& voice,int endTick) {
+void View::ExtendRecordedNote(const RecordVoice& voice,double endTick) {
     if (!voice.note) return;auto& notes=project.tracks[voice.track].notes;composition::Note* note=nullptr;
     for (auto& n:notes) if (n.id==voice.note) {note=&n;break;}
     if (!note) return;int end=project.beats*composition::PPQ;
     for (const auto& n:notes) if (n.id!=note->id && n.row==note->row && n.start>note->start) end=std::min(end,n.start);
-    note->length=std::max(1,std::min(end,endTick)-note->start);
+    int length=composition::QuantizeLength(endTick-voice.startTick,end-note->start);
+    if (length) note->length=length;
 }
 void View::UpdateRecording() {
     if (!recording_ || seeking_) return;
     positionBeat_=project.BeatAt(recordStartMs_+std::max(0.,game::NowMs()-recordClock_));
-    int tick=std::min(project.beats*composition::PPQ,int(std::llround(positionBeat_*composition::PPQ)));
+    double tick=positionBeat_*composition::PPQ;
     for (const auto& voice:recordVoices_) ExtendRecordedNote(voice,tick);
     for (const auto& voice:gameVoices_) ExtendRecordedNote(voice.second,tick);
 }
@@ -188,12 +198,13 @@ void View::ReleaseRecordingVoices() {
 }
 void View::StopRecording() {
     if (!recording_) return;RecordGameInput();UpdateRecording();app::SetGameInputCapture(false);gameVoices_.clear();ReleaseRecordingVoices();recording_=false;recordHeld_.fill(false);
-    if (auto note=Note()) newLength_=note->length;
+    if (auto note=Note()) newLength_=composition::QuantizeLength(note->length);
     if (recordRemembered_) Save();notice_=recordedNotes_ ? "即时创作已写入 "+std::to_string(recordedNotes_)+" 个音符 · 可撤销整次录入":"即时创作已结束，未录入音符。";
     if (skippedGameNotes_) notice_+=" · 游戏音符跳过 "+std::to_string(skippedGameNotes_);
 }
-unsigned View::AddRecordedNote(int row,int start,int length) {
-    composition::Note candidate;candidate.row=row;candidate.start=start;candidate.length=std::min(length,project.beats*composition::PPQ-start);candidate.velocity=velocity_;
+unsigned View::AddRecordedNote(int row,double tick,int length) {
+    int snapTicks=composition::PPQ/(1<<snap_);int start=int(std::llround(tick/snapTicks))*snapTicks;
+    composition::Note candidate;candidate.row=row;candidate.start=start;candidate.length=composition::QuantizeLength(length,project.beats*composition::PPQ-start);candidate.velocity=velocity_;
     if (!project.Place(selected_,candidate)) {error_="此位置已有同轨的同音高音符，本次录入已跳过。";return 0;}
     try {
         if (!recordRemembered_) {Remember();recordRemembered_=true;}
@@ -208,16 +219,16 @@ void View::RecordGameInput() {
     bool changed=false;
     for (const auto& event:batch.events) {
         if (seeking_ || event.timeMs<recordClock_) continue;
-        double ms=recordStartMs_+event.timeMs-recordClock_;int tick=int(std::llround(project.BeatAt(ms)*composition::PPQ));
+        double ms=recordStartMs_+event.timeMs-recordClock_,tick=project.BeatAt(ms)*composition::PPQ;
         if (!event.on) {
             auto voice=gameVoices_.find(event.handle);if (voice!=gameVoices_.end()) {ExtendRecordedNote(voice->second,tick);gameVoices_.erase(voice);changed=true;}continue;
         }
         if (tick>=project.beats*composition::PPQ) continue;
         int pitch=60+event.noteKey-project.tracks[selected_].middleDo,row=notepalette::Row(pitch);
         if (row<0) {++skippedGameNotes_;continue;}
-        auto id=AddRecordedNote(row,tick,event.sustained ? 1:newLength_);
+        auto id=AddRecordedNote(row,tick,event.sustained ? composition::MinNoteLength:newLength_);
         if (!id) {++skippedGameNotes_;continue;}changed=true;
-        if (event.sustained) gameVoices_[event.handle]=RecordVoice(id,selected_);
+        if (event.sustained) gameVoices_[event.handle]=RecordVoice(id,selected_,tick);
     }
     if (changed) Save();
 }
@@ -227,9 +238,9 @@ void View::RecordInput(const app::Status& status,bool input) {
         auto key=ImGuiKey(ImGuiKey_A+notepalette::RowKey(row)-'A');
         bool down=input && !io.WantTextInput && (ImGui::IsKeyDown(key) || (recordMouseRow_==row && ImGui::IsMouseDown(0)));
         if (down && !recordHeld_[row] && !io.KeyCtrl && !io.KeyAlt && !io.KeySuper && !seeking_) {
-            auto& track=project.tracks[selected_];int start=int(std::llround(positionBeat_*composition::PPQ));
+            auto& track=project.tracks[selected_];double tick=positionBeat_*composition::PPQ;int start=int(std::llround(tick));
             if (start<project.beats*composition::PPQ) {
-                auto id=AddRecordedNote(row,start,1);if (id) recordVoices_[row]=RecordVoice(id,selected_);
+                auto id=AddRecordedNote(row,tick,composition::MinNoteLength);if (id) recordVoices_[row]=RecordVoice(id,selected_,tick);
                 bool ready=status.preview || (status.game.ready && status.game.threadId && (!player::UsesShort(track.instrument,track.sustained) || status.game.shortReady));
                 if (ready) {app::Command command;command.action=app::Action::ManualOn;command.slot=row;command.instrument=track.instrument;command.sustained=track.sustained;command.key=track.middleDo+notepalette::RowPitch(row)-60;if (!app::Send(command)) error_="试听命令队列已满。";}
                 else if (recordVoices_[row].note) error_="音符已记录；发声前请先在游戏短音乐器界面弹一个音完成校准。";
@@ -244,7 +255,7 @@ void View::KeyboardInput(const app::Status& status,bool input) {
     const auto& io=ImGui::GetIO();
     if (!input || io.WantTextInput || io.KeyCtrl || io.KeyAlt || io.KeySuper || ImGui::IsKeyDown(ImGuiKey_Space)) return;
     int start=int(std::llround(positionBeat_*composition::PPQ));
-    int length=std::min(newLength_,project.beats*composition::PPQ-start);bool remembered=false;
+    int length=composition::QuantizeLength(newLength_,project.beats*composition::PPQ-start);bool remembered=false;
     for (int row=0;row<notepalette::Count;++row) {
         auto key=ImGuiKey(ImGuiKey_A+notepalette::RowKey(row)-'A');
         if (!ImGui::IsKeyPressed(key,false)) continue;
@@ -316,7 +327,7 @@ bool View::OpenMidi(const std::wstring& path) {
         in.seekg(0);std::vector<uint8_t> bytes(static_cast<size_t>(length));if (!in.read(reinterpret_cast<char*>(bytes.data()),bytes.size())) throw std::runtime_error("MIDI 文件读取不完整。");
         auto parsed=midi::Parse(bytes);for (auto& t:parsed.tracks) t.name=ui::Utf8(ui::Widen(t.name));composition::ImportStats stats;auto imported=composition::Project::Import(parsed,stats);
         Release();Remember();project=std::move(imported);Select(0);ResetPlayback();pan_=0;zoom_=1;error_.clear();Save();
-        notice_="已导入 "+std::to_string(stats.imported)+" 音符 · 半音上调 "+std::to_string(stats.converted)+" · 超出音域跳过 "+std::to_string(stats.skipped)+" · 重叠同音高合并 "+std::to_string(stats.merged)+" · 可撤销恢复原草稿";
+        notice_="已导入 "+std::to_string(stats.imported)+" 音符 · 半音上调 "+std::to_string(stats.converted)+" · 超出音域跳过 "+std::to_string(stats.skipped)+" · 同音高合并 "+std::to_string(stats.merged)+" · 时长对齐 "+std::to_string(stats.quantized)+" · 可撤销恢复原草稿";
         return true;
     }catch (const std::exception& e) {error_=e.what();return false;}
 }
@@ -388,12 +399,12 @@ void View::Sidebar(bool locked) {
         if (ImGui::Button("删除所选音符 / Delete")) Remove();ui::Mark("composer_delete_note");
     }else if (note) {
         ImGui::TextColored(ImVec4(.7f,.84f,1,1),"选中：%s · %c",notepalette::RowLabel(note->row),notepalette::RowKey(note->row));
-        float start=note->start/float(composition::PPQ),length=note->length/float(composition::PPQ);int velocity=note->velocity;
+        float start=note->start/float(composition::PPQ);int length=note->length,velocity=note->velocity;
         ImGui::SetNextItemWidth(S(135));bool change=ImGui::InputFloat("开始 / 拍",&start,.25f,1,"%.2f");
-        ImGui::SetNextItemWidth(S(135));change=ImGui::InputFloat("时长 / 拍",&length,.25f,1,"%.2f") || change;
+        ImGui::SetNextItemWidth(S(135));change=LengthInput("时长 / 拍",length,"composer_note_length") || change;
         ImGui::SetNextItemWidth(S(85));change=ImGui::SliderInt("力度",&velocity,1,127) || change;
-        if (change && std::isfinite(start) && std::isfinite(length) && start>=0 && length>0 && start+length<=project.beats) {
-            auto n=*note;n.start=int(std::llround(start*composition::PPQ));n.length=int(std::llround(length*composition::PPQ));n.velocity=velocity;
+        if (change && std::isfinite(start) && start>=0 && start+length/double(composition::PPQ)<=project.beats) {
+            auto n=*note;n.start=int(std::llround(start*composition::PPQ));n.length=composition::QuantizeLength(length);n.velocity=velocity;
             if (project.Place(selected_,n)) {Remember();*note=n;newLength_=n.length;error_.clear();Save();}else error_="同一轨的同音高音符不能重叠。";
         }
         if (ImGui::Button("删除音符 / Delete")) Remove();ui::Mark("composer_delete_note");
@@ -498,7 +509,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
             bool current=int(i)==selected_,chosen=selection_.count(n.id)!=0;
             bool active=Active(status.transport.state) && n.start<=playbackTick && n.start+n.length>playbackTick;
             draw->AddRectFilled(a,b,Color(track,active || chosen ? 255:current ? 230:150),S(2));
-            if (current || chosen) {draw->AddRect(a,b,chosen ? IM_COL32(255,236,179,255):Color(track),S(2),0,S(chosen ? 2.f:1.f));if (x2-x1>S(36)) draw->AddText(ImVec2(a.x+S(4),a.y),IM_COL32(17,27,32,255),notepalette::RowLabel(n.row));}
+            if (current || chosen) {draw->AddRect(a,b,chosen ? IM_COL32(255,236,179,255):Color(track),S(2),0,S(chosen ? 2.f:1.f));if (x2-x1>ImGui::CalcTextSize(notepalette::RowLabel(n.row)).x+S(8)) draw->AddText(ImVec2(a.x+S(4),a.y),IM_COL32(17,27,32,255),notepalette::RowLabel(n.row));}
             if (chosen && n.id==note_) ui::MarkRect("composer_note",a,b);
             if (&n==&track.notes.front()) ui::MarkRect(i==0 ? "composer_first_note":"composer_other_note",a,b);
             if (hovered && io.MousePos.x>=a.x && io.MousePos.x<=b.x && io.MousePos.y>=a.y && io.MousePos.y<=b.y) {hitTrack=int(i);hit=n.id;edge=io.MousePos.x>=x2-S(7);}
@@ -543,7 +554,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
             }
             else if (!io.KeyCtrl && project.tracks[selected_].visible) {
                 int start=int(std::floor((pan_+(io.MousePos.x-left)/beatWidth)*composition::PPQ/snapTicks))*snapTicks;
-                int length=std::min(newLength_,project.beats*composition::PPQ-start);
+                int length=composition::QuantizeLength(newLength_,project.beats*composition::PPQ-start);
                 if (start>=0 && length>0) try {Remember();note_=project.AddNote(selected_,row,start,length,velocity_);newLength_=length;selection_.clear();selection_.insert(note_);inspectorRequest_=1;BeginDrag(true,true);error_.clear();Save();Audition(status,row);}catch (const std::exception& e) {error_=e.what();}
             }else if (!io.KeyCtrl) error_="请先打开此轨的显示开关，再添加音符。";
         }
@@ -552,7 +563,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
         auto n=Note();if (n && input && ImGui::IsMouseDragging(0,S(3))) {
             deselectOnRelease_=false;int delta=int(std::llround((io.MousePos.x-dragX_)/beatWidth*composition::PPQ/snapTicks))*snapTicks;
             if (resizing_) {
-                auto moved=original_;moved.length=std::max(snapTicks,std::min(project.beats*composition::PPQ-moved.start,original_.length+delta));
+                auto moved=original_;moved.length=composition::QuantizeLength(original_.length+(io.MousePos.x-dragX_)/beatWidth*composition::PPQ,project.beats*composition::PPQ-moved.start);
                 if (moved.length!=n->length && project.Place(selected_,moved)) {if (!dragRemembered_) {Remember();dragRemembered_=true;}*n=moved;newLength_=moved.length;error_.clear();}
             }else {
                 delta=std::max(-dragFirstTick_,std::min(project.beats*composition::PPQ-dragEndTick_,delta));
@@ -600,8 +611,8 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
     ImGui::SameLine();ImGui::SetNextItemWidth(S(85));float bpm=float(60000/project.beatMs);if (ImGui::InputFloat("BPM",&bpm,0,0,"%.2f") && std::isfinite(bpm) && bpm>=3.75f && bpm<=6000) {Remember();project.beatMs=60000/double(bpm);Save();}ui::Mark("composer_bpm");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("每拍毫秒 = 60000 / BPM · 范围 3.75–6000\n设置默认拍长，原有速度变化仍保留；“统一拍长”可统一全曲");
     ImGui::EndDisabled();
-    ImGui::BeginDisabled(locked);const char* snaps[]={"1 拍","1/2 拍","1/4 拍","1/8 拍","1/16 拍"};ImGui::SetNextItemWidth(S(110));if (ImGui::Combo("网格",&snap_,snaps,5)) Save();
-    ImGui::SameLine();ImGui::SetNextItemWidth(S(90));float newLength=newLength_/float(composition::PPQ);if (ImGui::InputFloat("新音时长 / 拍",&newLength,0,0,"%.3f") && std::isfinite(newLength) && newLength>0 && newLength<=composition::MaxBeats) {newLength_=std::max(1,int(std::llround(newLength*composition::PPQ)));Save();}ImGui::SameLine();ImGui::SetNextItemWidth(S(65));if (ImGui::SliderInt("新音力度",&velocity_,1,127)) Save();ImGui::EndDisabled();
+    ImGui::BeginDisabled(locked);ImGui::SetNextItemWidth(S(110));if (ImGui::Combo("网格",&snap_,BeatLengths,5)) Save();ui::Mark("composer_snap");
+    ImGui::SameLine();ImGui::SetNextItemWidth(S(110));if (LengthInput("新音时长 / 拍",newLength_,"composer_new_length")) Save();ImGui::SameLine();ImGui::SetNextItemWidth(S(65));if (ImGui::SliderInt("新音力度",&velocity_,1,127)) Save();ImGui::EndDisabled();
     ImGui::SameLine();if (ImGui::Button("全曲")) {zoom_=1;pan_=0;}ImGui::SameLine();ImGui::SetNextItemWidth(S(110));ImGui::SliderFloat("缩放",&zoom_,1,composition::MaxZoom,"%.1fx",ImGuiSliderFlags_Logarithmic|ImGuiSliderFlags_AlwaysClamp);ui::Mark("composer_zoom");
     float span=project.beats/zoom_,maxPan=std::max(0.f,project.beats-span);pan_=std::max(0.f,std::min(maxPan,pan_));ImGui::SameLine();ImGui::SetNextItemWidth(S(110));ImGui::SliderFloat("起点 / 拍",&pan_,0,maxPan,"%.1f");
     ImGui::BeginDisabled(recording_);if (ImGui::Button(status.transport.state==player::State::Playing || status.transport.state==player::State::Countdown ? "暂停":"播放创作")) TogglePlayback(status);ui::Mark("composer_play");ImGui::EndDisabled();

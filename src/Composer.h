@@ -45,7 +45,7 @@ private:
     bool panning_=false,scrolling_=false;
     float panMouseX_=0,panAnchor_=0,scrollOffset_=0;
     double positionBeat_=0;
-    struct RecordVoice {unsigned note;int track;RecordVoice(unsigned n=0,int t=0):note(n),track(t) {}};
+    struct RecordVoice {unsigned note;int track;double startTick;RecordVoice(unsigned n=0,int t=0,double start=0):note(n),track(t),startTick(start) {}};
     std::array<RecordVoice,21> recordVoices_{};
     std::map<uint32_t,RecordVoice> gameVoices_;
     std::array<bool,21> recordHeld_{};
@@ -93,8 +93,8 @@ private:
     void RecordInput(const app::Status& status,bool input);
     void KeyboardInput(const app::Status& status,bool input);
     void RecordGameInput();
-    unsigned AddRecordedNote(int row,int start,int length);
-    void ExtendRecordedNote(const RecordVoice& voice,int endTick);
+    unsigned AddRecordedNote(int row,double tick,int length);
+    void ExtendRecordedNote(const RecordVoice& voice,double endTick);
     void Audition(const app::Status& status,int row,bool chord=false);
     void StopAudition();
     void Sidebar(bool locked);

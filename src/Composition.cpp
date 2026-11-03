@@ -49,6 +49,13 @@ void ValidateEditor(const Project& p,const EditorSettings& e) {
     if (found!=e.selection.size() || !active) throw std::runtime_error("创作工程音符选择无效。");
 }
 }
+bool IsNoteLength(int ticks) {return ticks>=MinNoteLength && ticks%MinNoteLength==0;}
+int QuantizeLength(double ticks,int available) {
+    if (!std::isfinite(ticks) || available<MinNoteLength) return 0;
+    int maximum=std::min(available,MaxBeats*PPQ)/MinNoteLength;
+    double steps=std::floor(ticks/MinNoteLength+.5);
+    return int(std::max(1.,std::min(double(maximum),steps)))*MinNoteLength;
+}
 Project::Project() {AddTrack();}
 int Project::AddTrack() {
     if (tracks.size()>=MaxTracks) throw std::runtime_error("最多支持 128 条创作音轨。");
@@ -63,7 +70,7 @@ int Project::AddTrack() {
 }
 size_t Project::NoteCount() const {size_t n=0;for (const auto& track:tracks) n+=track.notes.size();return n;}
 bool Project::Place(int track,const Note& note) const {
-    if (track<0 || track>=int(tracks.size()) || note.row<0 || note.row>=21 || note.start<0 || note.length<=0 ||
+    if (track<0 || track>=int(tracks.size()) || note.row<0 || note.row>=21 || note.start<0 || !IsNoteLength(note.length) ||
         note.start>beats*PPQ-note.length || note.velocity<1 || note.velocity>127) return false;
     for (const auto& other:tracks[track].notes) if (other.id!=note.id && other.row==note.row &&
         note.start<other.start+other.length && other.start<note.start+note.length) return false;
@@ -88,7 +95,7 @@ bool Project::MoveNotes(const std::set<unsigned>& ids,int tickDelta,int rowDelta
 }
 unsigned Project::AddNote(int track,int row,int start,int length,int velocity) {
     if (NoteCount()>=200000) throw std::runtime_error("创作音符数量已达上限。");
-    Note note;note.id=nextId;note.row=row;note.start=start;note.length=length;note.velocity=velocity;
+    Note note;note.id=nextId;note.row=row;note.start=start;note.length=length>0 && start>=0 && start<beats*PPQ ? QuantizeLength(length,beats*PPQ-start):0;note.velocity=velocity;
     if (!Place(track,note)) throw std::runtime_error("同一音轨的同音高音符不能重叠，且音符必须在时间轴内。");
     ++nextId;tracks[track].notes.push_back(note);return note.id;
 }
@@ -133,6 +140,36 @@ void Project::Validate() const {
         for (size_t n=1;n<ordered.size();++n) if (ordered[n]->row==ordered[n-1]->row && ordered[n]->start<ordered[n-1]->start+ordered[n-1]->length) throw std::runtime_error("同一轨的同音高音符不能重叠。");
     }
     if (nextId<=maxId) throw std::runtime_error("创作草稿标识无效。");
+}
+LengthStats Project::QuantizeLengths(EditorSettings* editor) {
+    LengthStats stats;int end=beats*PPQ;
+    if (editor) editor->newLength=QuantizeLength(editor->newLength);
+    for (auto& track:tracks) {
+        std::vector<Note*> ordered;std::set<unsigned> removed;
+        for (auto& note:track.notes) {
+            // A sub-sixteenth note at the very end needs enough room for the minimum duration.
+            if (note.start>end-MinNoteLength) {note.start=end-MinNoteLength;++stats.adjusted;}
+            ordered.push_back(&note);
+        }
+        std::sort(ordered.begin(),ordered.end(),[](const Note* a,const Note* b) {return a->row!=b->row ? a->row<b->row:a->start!=b->start ? a->start<b->start:a->id<b->id;});
+        auto finish=[&](Note* note,int limit) {
+            int length=QuantizeLength(note->length,limit-note->start);
+            if (length!=note->length) {note->length=length;++stats.adjusted;}
+        };
+        Note* previous=nullptr;
+        for (auto note:ordered) {
+            if (previous && previous->row==note->row && note->start-previous->start<MinNoteLength) {
+                previous->length=std::max(previous->start+previous->length,note->start+note->length)-previous->start;
+                previous->velocity=std::max(previous->velocity,note->velocity);removed.insert(note->id);++stats.merged;
+                if (editor) {if (editor->selection.erase(note->id)) editor->selection.insert(previous->id);if (editor->activeNote==note->id) editor->activeNote=previous->id;}
+                continue;
+            }
+            if (previous) finish(previous,previous->row==note->row ? note->start:end);
+            previous=note;
+        }
+        if (previous) finish(previous,end);
+        if (!removed.empty()) track.notes.erase(std::remove_if(track.notes.begin(),track.notes.end(),[&](const Note& note) {return removed.count(note.id)!=0;}),track.notes.end());
+    }return stats;
 }
 Bytes Project::Midi() const {
     Validate();Bytes out={'M','T','h','d',0,0,0,6,0,1,uint8_t((tracks.size()+1)>>8),uint8_t(tracks.size()+1),uint8_t(PPQ>>8),uint8_t(PPQ&255)};
@@ -193,7 +230,8 @@ Project Project::ReadDraft(const Bytes& bytes,EditorSettings* editor) {
         for (uint32_t i=0;i<selectedCount;++i) if (!e.selection.insert(in.U32()).second) throw std::runtime_error("创作工程选择标识重复。");
         e.inspectorTab=int(in.U32());e.moreSettings=in.Bool();e.sidebarWidth=in.F32();e.trackScroll=in.F32();
     }
-    if (in.pos!=bytes.size()) throw std::runtime_error("创作草稿包含多余数据。");p.Validate();ValidateEditor(p,e);if (editor) *editor=std::move(e);return p;
+    if (in.pos!=bytes.size()) throw std::runtime_error("创作草稿包含多余数据。");p.Validate();ValidateEditor(p,e);
+    p.QuantizeLengths(&e);p.Validate();ValidateEditor(p,e);if (editor) *editor=std::move(e);return p;
 }
 Project Project::Import(const midi::Song& song,ImportStats& stats) {
     stats=ImportStats{};Project p;p.tracks.clear();p.nextId=1;
@@ -229,6 +267,6 @@ Project Project::Import(const midi::Song& song,ImportStats& stats) {
     if (!smpte) for (const auto& tempo:song.tempos) {
         double tick=double(tempo.tick)*PPQ/song.division;if (tick>0 && tick<p.beats*PPQ) {int rounded=int(std::llround(tick));if (!rounded) p.beatMs=tempo.microseconds/1000.;else if (rounded<p.beats*PPQ) p.tempoChanges[rounded]=tempo.microseconds/1000.;}
     }
-    p.tempoChanges.erase(0);p.Validate();return p;
+    p.tempoChanges.erase(0);p.Validate();auto lengths=p.QuantizeLengths();stats.quantized=lengths.adjusted;stats.merged+=lengths.merged;stats.imported=p.NoteCount();p.Validate();return p;
 }
 }
