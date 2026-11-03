@@ -531,7 +531,8 @@ int Run(HINSTANCE module,bool preview,bool smoke,bool snapshot) {
     previewMode=preview;smokeMode=smoke;snapshotMode=snapshot;wchar_t filename[32768]{};GetModuleFileNameW(module,filename,32768);directory=filename;directory=directory.substr(0,directory.find_last_of(L"/\\")+1);
     ini=directory+(smoke ? L"MidiPlayer.smoke.ini":snapshot ? L"MidiPlayer.preview.ini":L"MidiPlayer.ini");speed=GetPrivateProfileIntW(L"player",L"speed",100,ini.c_str());delay=GetPrivateProfileIntW(L"player",L"delay",3,ini.c_str());
     performanceView.Load(ini);
-    composerView.Load(ini+L".composition");
+    // The smoke sequence assumes a fresh composer; normal launches restore the saved editor state.
+    if (!smoke) composerView.Load(ini+L".composition");
     if (smoke) {std::ofstream out(directory+L"MidiPlayer.ui-smoke.log");}
     if (preview) ImGui_ImplWin32_EnableDpiAwareness();WNDCLASSEXW wc{};wc.cbSize=sizeof(wc);wc.lpfnWndProc=WindowProc;wc.hInstance=module;wc.lpszClassName=windowClass;wc.hCursor=LoadCursor(nullptr,IDC_ARROW);wc.hIcon=LoadIcon(nullptr,IDI_APPLICATION);RegisterClassExW(&wc);
     RECT work{};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);int width=std::min(1380,int(work.right-work.left-48)),height=std::min(880,int(work.bottom-work.top-48));

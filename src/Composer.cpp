@@ -19,6 +19,12 @@ void Write(const std::wstring& path,const std::vector<uint8_t>& bytes) {
     {std::ofstream out(temp,std::ios::binary|std::ios::trunc);out.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());out.close();if (!out) {DeleteFileW(temp.c_str());throw std::runtime_error("无法完整写入文件，请检查目录权限和剩余空间。");}}
     if (!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {DeleteFileW(temp.c_str());throw std::runtime_error("无法保存文件，请检查目录权限或文件是否被占用。");}
 }
+std::vector<uint8_t> ReadProject(const std::wstring& path) {
+    std::ifstream in(path,std::ios::binary|std::ios::ate);auto size=in.tellg();
+    if (!in || size<0 || size>8*1024*1024) throw std::runtime_error("无法读取创作工程，或文件超过 8 MiB。");
+    in.seekg(0);std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    if (!in.read(reinterpret_cast<char*>(bytes.data()),bytes.size())) throw std::runtime_error("创作工程读取不完整。");return bytes;
+}
 }
 void View::Select(int track,bool clear) {
     if (track<0 || track>=int(project.tracks.size())) return;selected_=track;note_=0;inspectorRequest_=0;
@@ -49,16 +55,32 @@ void View::BeginDrag(bool resize,bool remembered) {
 void View::Load(const std::wstring& path) {
     draftPath_=path;
     if (GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES) try {
-        std::ifstream in(path,std::ios::binary|std::ios::ate);auto size=in.tellg();if (!in || size<0 || size>8*1024*1024) throw std::runtime_error("无法读取创作草稿。");
-        in.seekg(0);std::vector<uint8_t> bytes(static_cast<size_t>(size));if (!in.read(reinterpret_cast<char*>(bytes.data()),bytes.size())) throw std::runtime_error("创作草稿读取不完整。");project=composition::Project::ReadDraft(bytes);
+        composition::EditorSettings editor;auto loaded=composition::Project::ReadDraft(ReadProject(path),&editor);Restore(std::move(loaded),editor);return;
     }catch (const std::exception& e) {error_=e.what();}
     Select(0);
 }
-void View::Remember() {if (undo_.size()>=40) undo_.erase(undo_.begin());undo_.push_back(project);redo_.clear();transportLoaded_=false;}
-void View::Save() {if (draftPath_.empty()) return;try {Write(draftPath_,project.Draft());}catch (const std::exception& e) {error_=e.what();}}
+composition::EditorSettings View::Settings() const {
+    composition::EditorSettings e;e.selectedTrack=std::max(0,std::min(selected_,int(project.tracks.size())-1));e.snap=snap_;e.newLength=newLength_;e.velocity=velocity_;
+    e.zoom=zoom_;e.pan=std::max(0.f,std::min(pan_,float(project.beats)));e.positionBeat=std::max(0.,std::min(positionBeat_,double(project.beats)));
+    e.receiveGame=receiveGame_;e.inspectorTab=inspectorRequest_>=0 ? inspectorRequest_:inspectorTab_;e.moreSettings=moreSettings_;e.sidebarWidth=sidebarWidth_;e.trackScroll=trackScroll_;
+    for (size_t i=0;i<project.tracks.size();++i) if (project.tracks[i].visible) for (const auto& n:project.tracks[i].notes) if (selection_.count(n.id)) {
+        e.selection.insert(n.id);if (n.id==note_ && int(i)==e.selectedTrack) e.activeNote=n.id;
+    }return e;
+}
+void View::Restore(composition::Project loaded,const composition::EditorSettings& e) {
+    project=std::move(loaded);Select(e.selectedTrack);snap_=e.snap;newLength_=e.newLength;velocity_=e.velocity;zoom_=e.zoom;pan_=e.pan;positionBeat_=e.positionBeat;
+    receiveGame_=e.receiveGame;note_=e.activeNote;selection_=e.selection;inspectorTab_=inspectorRequest_=e.inspectorTab;moreSettings_=e.moreSettings;
+    sidebarWidth_=e.sidebarWidth;drawnSidebarWidth_=0;trackScroll_=e.trackScroll;restoreScrollFrames_=2;++layoutRevision_;
+    dragging_=resizing_=dragRemembered_=deselectOnRelease_=seeking_=panning_=scrolling_=transportLoaded_=false;
+}
+void View::Remember(bool restoreEditor) {if (undo_.size()>=40) undo_.erase(undo_.begin());undo_.push_back({project,Settings(),restoreEditor});redo_.clear();transportLoaded_=false;}
+void View::Save() {if (draftPath_.empty()) return;try {auto editor=Settings();Write(draftPath_,project.Draft(&editor));}catch (const std::exception& e) {error_=e.what();}}
 void View::Undo(bool redo) {
     auto& from=redo ? redo_:undo_;auto& to=redo ? undo_:redo_;if (from.empty()) return;
-    to.push_back(project);project=std::move(from.back());from.pop_back();Select(std::min(selected_,int(project.tracks.size())-1));dragging_=false;transportLoaded_=false;positionBeat_=std::min(positionBeat_,double(project.beats));error_.clear();Save();
+    bool full=from.back().restoreEditor;to.push_back({project,Settings(),full});auto previous=std::move(from.back());from.pop_back();
+    if (full) Restore(std::move(previous.project),previous.editor);
+    else {project=std::move(previous.project);Select(std::min(selected_,int(project.tracks.size())-1));dragging_=false;transportLoaded_=false;positionBeat_=std::min(positionBeat_,double(project.beats));}
+    error_.clear();Save();
 }
 void View::Remove() {
     if (selection_.empty()) return;Remember();
@@ -110,7 +132,7 @@ void View::StopAudition() {
 }
 void View::Release() {
     StopRecording();StopAudition();seeking_=false;panning_=scrolling_=false;
-    if (dragging_) {dragging_=false;Save();}
+    dragging_=false;Save();
 }
 void View::LoseFocus() {
     if (!recording_ || !receiveGame_) {Release();return;}
@@ -254,6 +276,32 @@ void View::Import(HWND owner) {
     if (!GetOpenFileNameW(&dialog)) return;
     OpenMidi(path);
 }
+void View::SaveProjectDialog(HWND owner) {
+    wchar_t path[32768]=L"创作.mpc";OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;
+    dialog.lpstrFilter=L"创作工程 (*.mpc)\0*.mpc\0\0";dialog.lpstrFile=path;dialog.nMaxFile=32768;dialog.lpstrDefExt=L"mpc";
+    dialog.Flags=OFN_OVERWRITEPROMPT|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+    if (GetSaveFileNameW(&dialog)) SaveProject(path);
+}
+void View::ImportProject(HWND owner) {
+    wchar_t path[32768]{};OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;
+    dialog.lpstrFilter=L"创作工程 (*.mpc;*.composition)\0*.mpc;*.composition\0所有文件\0*.*\0\0";dialog.lpstrFile=path;dialog.nMaxFile=32768;
+    dialog.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&dialog)) OpenProject(path);
+}
+bool View::SaveProject(const std::wstring& path) {
+    if (recording_ || Active(app::GetStatus().transport.state)) {error_="请先停止播放或结束即时创作，再保存工程。";return false;}
+    try {
+        auto editor=Settings();Write(path,project.Draft(&editor));error_.clear();notice_="已保存工程："+ui::Utf8(path);Save();return true;
+    }catch (const std::exception& e) {error_=std::string("保存工程失败：")+e.what();return false;}
+}
+bool View::OpenProject(const std::wstring& path) {
+    if (recording_ || Active(app::GetStatus().transport.state)) {error_="请先停止播放或结束即时创作，再导入工程。";return false;}
+    try {
+        composition::EditorSettings editor;auto loaded=composition::Project::ReadDraft(ReadProject(path),&editor);
+        app::Command stop;stop.action=app::Action::Stop;if (!app::Send(stop)) throw std::runtime_error("命令队列已满。");
+        Release();Remember(true);Restore(std::move(loaded),editor);error_.clear();notice_="已导入工程："+ui::Utf8(path)+" · 可撤销恢复原工程";Save();return true;
+    }catch (const std::exception& e) {error_=std::string("导入工程失败：")+e.what();return false;}
+}
 bool View::OpenMidi(const std::wstring& path) {
     try {
         std::ifstream in(path,std::ios::binary|std::ios::ate);auto length=in.tellg();if (!in || length<0 || length>64*1024*1024) throw std::runtime_error("无法读取 MIDI，或文件超过 64 MiB。");
@@ -294,6 +342,8 @@ void View::Sidebar(bool locked) {
     if (ImGui::SmallButton("显示全部")) {Remember();for (auto& t:project.tracks) t.visible=true;Save();}ui::Mark("composer_show_all");ImGui::SameLine();
     if (ImGui::SmallButton("只显示此轨")) {Remember();for (size_t i=0;i<project.tracks.size();++i) project.tracks[i].visible=int(i)==selected_;PruneSelection();Save();}ui::Mark("composer_solo");
     ImGui::EndDisabled();
+    // A recreated child needs one frame to measure its content before the saved scroll can be clamped correctly.
+    if (restoreScrollFrames_) ImGui::SetNextWindowScroll(ImVec2(0,S(trackScroll_)));
     ImGui::BeginChild("composer_track_list",ImVec2(0,std::max(S(100),std::min(S(130),ImGui::GetContentRegionAvail().y*.24f))),ImGuiChildFlags_Borders);
     for (size_t i=0;i<project.tracks.size();++i) {
         auto& t=project.tracks[i];ImGui::PushID(int(t.id));bool visible=t.visible;ImGui::BeginDisabled(locked);
@@ -301,16 +351,18 @@ void View::Sidebar(bool locked) {
         ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(t.color[0],t.color[1],t.color[2],1));
         auto label=t.name+"  ("+std::to_string(t.notes.size())+")";if (ImGui::Selectable(label.c_str(),selected_==int(i))) Select(int(i));ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s · %s\n显示开关只影响时间轴，不影响导出或播放",t.name.c_str(),ui::Utf8(instrumentui::InstrumentLabel(t.instrument)).c_str(),t.sustained ? "长音":"短音");ImGui::PopID();
-    }ImGui::EndChild();ImGui::BeginDisabled(locked);auto& t=project.tracks[selected_];
+    }if (restoreScrollFrames_) --restoreScrollFrames_;if (!restoreScrollFrames_) trackScroll_=ImGui::GetScrollY()/S(1);
+    ImGui::EndChild();ImGui::BeginDisabled(locked);auto& t=project.tracks[selected_];
     if (ImGui::BeginTabBar("composer_inspector")) {
     if (ImGui::BeginTabItem("音轨设置",nullptr,inspectorRequest_==0 ? ImGuiTabItemFlags_SetSelected:0)) {
+    inspectorTab_=0;
     ImGui::SetNextItemWidth(-1);if (ImGui::InputTextWithHint("##composer_name","音轨名称",name_,sizeof(name_)) && name_[0]) {Remember();t.name=name_;Save();}
     auto c=player::TrackConfig{};c.instrument=t.instrument;c.middleDo=t.middleDo;c.sustained=t.sustained;
     ImGui::TextUnformatted("游戏乐器");ImGui::SetNextItemWidth(-1);if (instrumentui::InstrumentInput(c,instrument_,sizeof(instrument_))) {
         int id;if (instrumentui::ReadInstrument(instrument_,id)) {Remember();t.instrument=id;t.sustained=c.sustained;error_.clear();Save();}else error_="请选择预设乐器，或输入 1–1000000 的乐器 ID。";
     }
     c.sustained=t.sustained;if (instrumentui::SustainedInput(c)) {Remember();t.sustained=c.sustained;Save();}
-    if (ImGui::CollapsingHeader("更多设置")) {
+    ImGui::SetNextItemOpen(moreSettings_,ImGuiCond_Always);moreSettings_=ImGui::CollapsingHeader("更多设置");if (moreSettings_) {
     float color[3]={t.color[0],t.color[1],t.color[2]};if (ImGui::ColorEdit3("轨色",color,ImGuiColorEditFlags_NoInputs)) {Remember();std::copy(color,color+3,t.color);Save();}
     int middle=t.middleDo;ImGui::SetNextItemWidth(S(85));if (ImGui::InputInt("中音 Do 键",&middle,0) && middle>=13 && middle<=999977) {Remember();t.middleDo=middle;Save();}
     if (ImGui::Button("删除此轨")) ImGui::OpenPopup("delete_track");
@@ -321,6 +373,7 @@ void View::Sidebar(bool locked) {
     ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("音符设置",nullptr,inspectorRequest_==1 ? ImGuiTabItemFlags_SetSelected:0)) {
+    inspectorTab_=1;
     ImGui::Separator();auto note=Note();if (selection_.size()>1) {
         ImGui::TextColored(ImVec4(.7f,.84f,1,1),"已选 %u 个音符",unsigned(selection_.size()));
         ui::Muted("Ctrl 点选添加 / 取消选择。\n拖动已选音符，整体移动时间和音高。");
@@ -489,29 +542,33 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     ImGui::EndChild();
 }
 void View::Draw(const app::Status& status,HWND owner,float height,bool focused) {
+    if (selected_<0 || selected_>=int(project.tracks.size())) Select(0);
     if (transportLoaded_ && !seeking_ && (Active(status.transport.state) || status.transport.state==player::State::Finished || status.transport.state==player::State::Error)) positionBeat_=project.BeatAt(status.transport.positionMs);
     positionBeat_=std::max(0.,std::min(double(project.beats),positionBeat_));
     bool locked=recording_ || Active(status.transport.state);ImGui::BeginChild("composer_workspace",ImVec2(0,height),ImGuiChildFlags_Borders);
     ImGui::BeginDisabled(locked);if (ImGui::Button("新建")) ImGui::OpenPopup("new_composition");
     if (ImGui::BeginPopup("new_composition")) {ImGui::TextWrapped("清空当前创作并新建？可通过撤销恢复。");if (ImGui::Button("确认新建")) {Remember();project=composition::Project{};Select(0);ResetPlayback();pan_=0;Save();ImGui::CloseCurrentPopup();}ImGui::EndPopup();}
     ImGui::SameLine();ImGui::BeginDisabled(undo_.empty());if (ImGui::Button("撤销")) Undo(false);ui::Mark("composer_undo");ImGui::EndDisabled();ImGui::SameLine();ImGui::BeginDisabled(redo_.empty());if (ImGui::Button("重做")) Undo(true);ImGui::EndDisabled();
-    ImGui::SameLine();ImGui::SetNextItemWidth(S(85));int beats=project.beats;if (ImGui::InputInt("总拍数",&beats,0) && beats>=1 && beats<=composition::MaxBeats) {
+    ImGui::SameLine();if (ImGui::Button("保存工程…")) SaveProjectDialog(owner);ui::Mark("composer_save_project");
+    ImGui::SameLine();if (ImGui::Button("导入工程…")) ImportProject(owner);ui::Mark("composer_open_project");
+    ImGui::SameLine();if (ImGui::Button("导入 MIDI…")) Import(owner);ui::Mark("composer_import");ImGui::EndDisabled();ImGui::SameLine();
+    if (ImGui::Button("导出 MIDI…")) Export(owner);ui::Mark("composer_export");
+    ImGui::BeginDisabled(locked);ImGui::SetNextItemWidth(S(85));int beats=project.beats;if (ImGui::InputInt("总拍数",&beats,0) && beats>=1 && beats<=composition::MaxBeats) {
         int end=0;for (const auto& t:project.tracks) for (const auto& n:t.notes) end=std::max(end,n.start+n.length);
         if (beats*composition::PPQ>=end) {Remember();project.beats=beats;for (auto it=project.beatTimes.begin();it!=project.beatTimes.end();) if (it->first>=beats) it=project.beatTimes.erase(it);else ++it;for (auto it=project.tempoChanges.begin();it!=project.tempoChanges.end();) if (it->first>=beats*composition::PPQ) it=project.tempoChanges.erase(it);else ++it;positionBeat_=std::min(positionBeat_,double(beats));Save();}else error_="总拍数不能小于现有音符的结束位置。";
     }
     ImGui::SameLine();ImGui::SetNextItemWidth(S(100));float ms=float(project.beatMs);if (ImGui::InputFloat("每拍 / 毫秒",&ms,0,0,"%.1f") && std::isfinite(ms) && ms>=10 && ms<=16000) {Remember();project.beatMs=ms;Save();}ui::Mark("composer_beat_ms");
     ImGui::SameLine();ImGui::SetNextItemWidth(S(85));float bpm=float(60000/project.beatMs);if (ImGui::InputFloat("BPM",&bpm,0,0,"%.2f") && std::isfinite(bpm) && bpm>=3.75f && bpm<=6000) {Remember();project.beatMs=60000/double(bpm);Save();}ui::Mark("composer_bpm");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("每拍毫秒 = 60000 / BPM · 范围 3.75–6000\n设置默认拍长，原有速度变化仍保留；“统一拍长”可统一全曲");
-    ImGui::SameLine();if (ImGui::Button("导入 MIDI…")) Import(owner);ui::Mark("composer_import");ImGui::EndDisabled();ImGui::SameLine();
-    if (ImGui::Button("导出 MIDI…")) Export(owner);ui::Mark("composer_export");
-    ImGui::BeginDisabled(locked);const char* snaps[]={"1 拍","1/2 拍","1/4 拍","1/8 拍","1/16 拍"};ImGui::SetNextItemWidth(S(110));ImGui::Combo("网格",&snap_,snaps,5);
-    ImGui::SameLine();ImGui::SetNextItemWidth(S(90));float newLength=newLength_/float(composition::PPQ);if (ImGui::InputFloat("新音时长 / 拍",&newLength,0,0,"%.3f") && std::isfinite(newLength) && newLength>0 && newLength<=composition::MaxBeats) newLength_=std::max(1,int(std::llround(newLength*composition::PPQ)));ImGui::SameLine();ImGui::SetNextItemWidth(S(65));ImGui::SliderInt("新音力度",&velocity_,1,127);ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(locked);const char* snaps[]={"1 拍","1/2 拍","1/4 拍","1/8 拍","1/16 拍"};ImGui::SetNextItemWidth(S(110));if (ImGui::Combo("网格",&snap_,snaps,5)) Save();
+    ImGui::SameLine();ImGui::SetNextItemWidth(S(90));float newLength=newLength_/float(composition::PPQ);if (ImGui::InputFloat("新音时长 / 拍",&newLength,0,0,"%.3f") && std::isfinite(newLength) && newLength>0 && newLength<=composition::MaxBeats) {newLength_=std::max(1,int(std::llround(newLength*composition::PPQ)));Save();}ImGui::SameLine();ImGui::SetNextItemWidth(S(65));if (ImGui::SliderInt("新音力度",&velocity_,1,127)) Save();ImGui::EndDisabled();
     ImGui::SameLine();if (ImGui::Button("全曲")) {zoom_=1;pan_=0;}ImGui::SameLine();ImGui::SetNextItemWidth(S(110));ImGui::SliderFloat("缩放",&zoom_,1,32,"%.1fx",ImGuiSliderFlags_Logarithmic);
     float span=std::max(1.f,project.beats/zoom_),maxPan=std::max(0.f,project.beats-span);pan_=std::max(0.f,std::min(maxPan,pan_));ImGui::SameLine();ImGui::SetNextItemWidth(S(110));ImGui::SliderFloat("起点 / 拍",&pan_,0,maxPan,"%.1f");
     ImGui::BeginDisabled(recording_);if (ImGui::Button(status.transport.state==player::State::Playing || status.transport.state==player::State::Countdown ? "暂停":"播放创作")) TogglePlayback(status);ui::Mark("composer_play");ImGui::EndDisabled();
     ImGui::SameLine();if (ImGui::Button("停止")) {app::Command c;c.action=app::Action::Stop;if (app::Send(c)) ResetPlayback();}ui::Mark("composer_stop");
     ImGui::SameLine();ImGui::BeginDisabled(Active(status.transport.state));if (ImGui::Button(recording_ ? "结束即时创作":"即时创作")) {if (recording_) StopRecording();else StartRecording();}ui::Mark("composer_record");ImGui::EndDisabled();
-    ImGui::SameLine();ImGui::BeginDisabled(recording_);ImGui::Checkbox("接收游戏弹奏",&receiveGame_);ui::Mark("composer_receive_game");ImGui::EndDisabled();
+    ImGui::SameLine();ImGui::BeginDisabled(recording_);if (ImGui::Checkbox("接收游戏弹奏",&receiveGame_)) Save();ui::Mark("composer_receive_game");ImGui::EndDisabled();
     if (!project.tempoChanges.empty() || !project.beatTimes.empty()) {ImGui::SameLine();ImGui::BeginDisabled(locked);if (ImGui::Button("统一拍长")) {Remember();project.tempoChanges.clear();project.beatTimes.clear();Save();}ImGui::EndDisabled();}
     ImGui::SameLine();ImGui::TextDisabled("位置 %s",ui::Time(project.Time(positionBeat_),true).c_str());
     if (recording_) {ImGui::SameLine();ImGui::TextColored(ImVec4(1,.8f,.4f,1),receiveGame_ ? "录入中 · 游戏 + 插件键盘":"录入中 · 插件键盘");}
@@ -522,11 +579,16 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
     if (status.transport.state==player::State::Countdown) ImGui::TextColored(ImVec4(1,.8f,.45f,1),"倒计时 %.1f 秒 · 请切回游戏演奏界面",status.transport.countdownMs/1000.);
     else if (status.transport.state==player::State::Error) ImGui::TextColored(ImVec4(1,.5f,.45f,1),"演奏失败：%s",ui::Utf8(ui::Widen(status.transport.error)).c_str());
     if (recording_ && !seeking_ && !panning_ && !scrolling_ && (positionBeat_<pan_ || positionBeat_>pan_+span*.9f)) pan_=std::max(0.f,std::min(maxPan,float(positionBeat_)-span*.15f));
-    if (ImGui::BeginTable("composer_layout",2,ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn("tracks",ImGuiTableColumnFlags_WidthFixed,S(245));ImGui::TableSetupColumn("roll",ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableNextColumn();float body=std::max(S(220),ImGui::GetContentRegionAvail().y);ImGui::BeginChild("composer_sidebar",ImVec2(0,body));Sidebar(locked);ImGui::EndChild();
+    ImGui::PushID(layoutRevision_);
+    if (ImGui::BeginTable("composer_layout",2,ImGuiTableFlags_Resizable|ImGuiTableFlags_NoSavedSettings)) {
+        ImGui::TableSetupColumn("tracks",ImGuiTableColumnFlags_WidthFixed,S(sidebarWidth_));ImGui::TableSetupColumn("roll",ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableNextColumn();float drawnWidth=ImGui::GetContentRegionAvail().x/S(1);
+        // Keep the saved width through ImGui's pixel rounding; update it when the displayed column actually changes.
+        if (drawnSidebarWidth_>0 && std::abs(drawnWidth-drawnSidebarWidth_)>.01f) sidebarWidth_=drawnWidth;
+        drawnSidebarWidth_=drawnWidth;float body=std::max(S(220),ImGui::GetContentRegionAvail().y);ImGui::BeginChild("composer_sidebar",ImVec2(0,body));Sidebar(locked);ImGui::EndChild();
         ImGui::TableNextColumn();ImGui::BeginChild("composer_grid_holder",ImVec2(0,body));Grid(status,focused,locked);ImGui::EndChild();ImGui::EndTable();
     }
+    ImGui::PopID();
     const auto& io=ImGui::GetIO();
     bool editKeys=focused && !locked && !io.AppFocusLost && !io.WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && !dragging_ && !seeking_ && !panning_ && !scrolling_ && !ImGui::IsKeyDown(ImGuiKey_Space);
     if (editKeys && io.KeyCtrl && !io.KeyAlt && !io.KeySuper) {

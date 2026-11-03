@@ -18,6 +18,14 @@ struct Track {
     std::vector<Note> notes;
 };
 struct ImportStats {size_t imported=0,converted=0,skipped=0,merged=0;};
+struct EditorSettings {
+    int selectedTrack=0,snap=2,newLength=PPQ,velocity=100,inspectorTab=0;
+    float zoom=2,pan=0,sidebarWidth=245,trackScroll=0;
+    double positionBeat=0;
+    bool receiveGame=true,moreSettings=false;
+    unsigned activeNote=0;
+    std::set<unsigned> selection;
+};
 struct Project {
     int beats=32;
     double beatMs=500;
@@ -38,8 +46,9 @@ struct Project {
     double BeatAt(double ms) const;
     void Validate() const;
     std::vector<uint8_t> Midi() const;
-    std::vector<uint8_t> Draft() const;
-    static Project ReadDraft(const std::vector<uint8_t>& bytes);
+    // An editor snapshot writes V3 with exact values; omitting it retains the V2 data-only format.
+    std::vector<uint8_t> Draft(const EditorSettings* editor=nullptr) const;
+    static Project ReadDraft(const std::vector<uint8_t>& bytes,EditorSettings* editor=nullptr);
     static Project Import(const midi::Song& song,ImportStats& stats);
 };
 }

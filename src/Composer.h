@@ -22,9 +22,14 @@ public:
     bool Recording() const {return recording_;}
     int NewNoteLength() const {return newLength_;}
     bool OpenMidi(const std::wstring& path);
+    bool SaveProject(const std::wstring& path);
+    bool OpenProject(const std::wstring& path);
 private:
     int selected_=0,snap_=2,newLength_=composition::PPQ,velocity_=100;
     int inspectorRequest_=0;
+    int inspectorTab_=0,layoutRevision_=0,restoreScrollFrames_=0;
+    bool moreSettings_=false;
+    float sidebarWidth_=245,drawnSidebarWidth_=0,trackScroll_=0;
     std::array<double,21> auditionEnds_{};
     unsigned note_=0;
     std::set<unsigned> selection_;
@@ -51,7 +56,11 @@ private:
     float dragX_=0,dragY_=0;
     std::wstring draftPath_;
     std::string error_,notice_;
-    std::vector<composition::Project> undo_,redo_;
+    struct History {
+        composition::Project project;composition::EditorSettings editor;bool restoreEditor;
+        History(const composition::Project& p,composition::EditorSettings e,bool restore):project(p),editor(std::move(e)),restoreEditor(restore) {}
+    };
+    std::vector<History> undo_,redo_;
     struct ClipboardTrack {int offset;composition::Track track;};
     std::vector<ClipboardTrack> clipboard_;
     void Select(int track,bool clear=true);
@@ -59,7 +68,9 @@ private:
     void PruneSelection();
     void BeginDrag(bool resize,bool remembered=false);
     composition::Note* Note();
-    void Remember();
+    composition::EditorSettings Settings() const;
+    void Restore(composition::Project project,const composition::EditorSettings& editor);
+    void Remember(bool restoreEditor=false);
     void Save();
     void Undo(bool redo);
     void Remove();
@@ -67,6 +78,8 @@ private:
     void Paste();
     void Export(HWND owner);
     void Import(HWND owner);
+    void SaveProjectDialog(HWND owner);
+    void ImportProject(HWND owner);
     void Play(const app::Status& status);
     void Seek(double beat,const app::Status& status);
     void StartRecording();

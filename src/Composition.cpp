@@ -10,6 +10,8 @@ namespace composition {
 namespace {
 using Bytes=std::vector<uint8_t>;
 void U32(Bytes& out,uint32_t n) {for (int s=24;s>=0;s-=8) out.push_back(uint8_t(n>>s));}
+void F32(Bytes& out,float value) {uint32_t bits;std::memcpy(&bits,&value,4);U32(out,bits);}
+void F64(Bytes& out,double value) {uint64_t bits;std::memcpy(&bits,&value,8);U32(out,uint32_t(bits>>32));U32(out,uint32_t(bits));}
 void VLQ(Bytes& out,uint32_t n) {
     if (n>0x0fffffff) throw std::runtime_error("MIDI 时间超出范围。");
     uint8_t b[4];int count=0;b[count++]=uint8_t(n&127);
@@ -28,8 +30,24 @@ struct Reader {
     const Bytes& bytes;size_t pos=0;
     explicit Reader(const Bytes& value):bytes(value) {}
     uint32_t U32() {if (bytes.size()-pos<4) throw std::runtime_error("创作草稿不完整。");uint32_t n=0;for (int i=0;i<4;++i) n=(n<<8)|bytes[pos++];return n;}
+    float F32() {auto bits=U32();float value;std::memcpy(&value,&bits,4);return value;}
+    double F64() {uint64_t bits=uint64_t(U32())<<32;bits|=U32();double value;std::memcpy(&value,&bits,8);return value;}
+    bool Bool() {auto value=U32();if (value>1) throw std::runtime_error("创作工程开关值无效。");return value!=0;}
     std::string String() {auto n=U32();if (n>255 || n>bytes.size()-pos) throw std::runtime_error("创作草稿音轨名无效。");std::string text(bytes.begin()+pos,bytes.begin()+pos+n);pos+=n;return text;}
 };
+void ValidateEditor(const Project& p,const EditorSettings& e) {
+    if (e.selectedTrack<0 || e.selectedTrack>=int(p.tracks.size()) || e.snap<0 || e.snap>4 || e.newLength<1 || e.newLength>MaxBeats*PPQ ||
+        e.velocity<1 || e.velocity>127 || e.inspectorTab<0 || e.inspectorTab>1 || !std::isfinite(e.zoom) || e.zoom<1 || e.zoom>32 ||
+        !std::isfinite(e.pan) || e.pan<0 || e.pan>p.beats || !std::isfinite(e.positionBeat) || e.positionBeat<0 || e.positionBeat>p.beats ||
+        !std::isfinite(e.sidebarWidth) || e.sidebarWidth<1 || e.sidebarWidth>10000 || !std::isfinite(e.trackScroll) || e.trackScroll<0 || e.trackScroll>1000000 ||
+        e.selection.size()>p.NoteCount()) throw std::runtime_error("创作工程界面设置无效。");
+    size_t found=0;bool active=!e.activeNote;
+    for (size_t i=0;i<p.tracks.size();++i) for (const auto& n:p.tracks[i].notes) {
+        if (e.selection.count(n.id)) {if (!p.tracks[i].visible) throw std::runtime_error("创作工程选择了隐藏音轨的音符。");++found;}
+        if (n.id==e.activeNote && int(i)==e.selectedTrack && e.selection.count(n.id)) active=true;
+    }
+    if (found!=e.selection.size() || !active) throw std::runtime_error("创作工程音符选择无效。");
+}
 }
 Project::Project() {AddTrack();}
 int Project::AddTrack() {
@@ -137,29 +155,45 @@ Bytes Project::Midi() const {
         Meta(data,0x2f,{},uint32_t(beats*PPQ)-previous);Chunk(out,data);
     }return out;
 }
-Bytes Project::Draft() const {
-    Validate();Bytes out={'M','P','C',2};U32(out,uint32_t(beats));U32(out,Tempo(beatMs));U32(out,nextId);U32(out,uint32_t(beatTimes.size()));
-    for (const auto& beat:beatTimes) {U32(out,uint32_t(beat.first));U32(out,Tempo(beat.second));}
-    U32(out,uint32_t(tempoChanges.size()));for (const auto& tempo:tempoChanges) {U32(out,uint32_t(tempo.first));U32(out,Tempo(tempo.second));}
+Bytes Project::Draft(const EditorSettings* editor) const {
+    Validate();if (editor) ValidateEditor(*this,*editor);Bytes out={'M','P','C',uint8_t(editor ? 3:2)};
+    auto duration=[&](double ms) {if (editor) F64(out,ms);else U32(out,Tempo(ms));};
+    U32(out,uint32_t(beats));duration(beatMs);U32(out,nextId);U32(out,uint32_t(beatTimes.size()));
+    for (const auto& beat:beatTimes) {U32(out,uint32_t(beat.first));duration(beat.second);}
+    U32(out,uint32_t(tempoChanges.size()));for (const auto& tempo:tempoChanges) {U32(out,uint32_t(tempo.first));duration(tempo.second);}
     U32(out,uint32_t(tracks.size()));for (const auto& track:tracks) {
         U32(out,track.id);String(out,track.name);U32(out,uint32_t(track.instrument));U32(out,uint32_t(track.middleDo));U32(out,uint32_t(track.sustained));U32(out,uint32_t(track.visible));
-        for (float c:track.color) U32(out,uint32_t(std::llround(c*65535)));
+        for (float c:track.color) {if (editor) F32(out,c);else U32(out,uint32_t(std::llround(c*65535)));}
         U32(out,uint32_t(track.notes.size()));for (const auto& note:track.notes) {U32(out,note.id);U32(out,uint32_t(note.row));U32(out,uint32_t(note.start));U32(out,uint32_t(note.length));U32(out,uint32_t(note.velocity));}
+    }
+    if (editor) {
+        const auto& e=*editor;U32(out,uint32_t(e.selectedTrack));U32(out,uint32_t(e.snap));U32(out,uint32_t(e.newLength));U32(out,uint32_t(e.velocity));
+        F32(out,e.zoom);F32(out,e.pan);F64(out,e.positionBeat);U32(out,uint32_t(e.receiveGame));U32(out,e.activeNote);
+        U32(out,uint32_t(e.selection.size()));for (auto id:e.selection) U32(out,id);
+        U32(out,uint32_t(e.inspectorTab));U32(out,uint32_t(e.moreSettings));F32(out,e.sidebarWidth);F32(out,e.trackScroll);
     }return out;
 }
-Project Project::ReadDraft(const Bytes& bytes) {
+Project Project::ReadDraft(const Bytes& bytes,EditorSettings* editor) {
     if (bytes.size()>8*1024*1024) throw std::runtime_error("创作草稿过大。");
-    Reader in{bytes};auto version=in.U32();if (version!=0x4d504301 && version!=0x4d504302) throw std::runtime_error("无法识别创作草稿版本。");
-    Project p;p.tracks.clear();p.beats=int(in.U32());p.beatMs=in.U32()/1000.;p.nextId=in.U32();auto beatCount=in.U32();if (beatCount>MaxBeats) throw std::runtime_error("创作草稿拍数无效。");
-    for (uint32_t i=0;i<beatCount;++i) {int beat=int(in.U32());double ms=in.U32()/1000.;if (!p.beatTimes.emplace(beat,ms).second) throw std::runtime_error("创作草稿拍数重复。");}
-    if (version==0x4d504302) {auto tempos=in.U32();if (tempos>65536) throw std::runtime_error("创作草稿速度变化过多。");for (uint32_t i=0;i<tempos;++i) {int tick=int(in.U32());double ms=in.U32()/1000.;if (!p.tempoChanges.emplace(tick,ms).second) throw std::runtime_error("创作草稿速度变化重复。");}}
+    Reader in{bytes};auto version=in.U32();if (version<0x4d504301 || version>0x4d504303) throw std::runtime_error("无法识别创作工程版本。");
+    bool full=version==0x4d504303;auto duration=[&]() {return full ? in.F64():in.U32()/1000.;};
+    Project p;p.tracks.clear();p.beats=int(in.U32());p.beatMs=duration();p.nextId=in.U32();auto beatCount=in.U32();if (beatCount>MaxBeats) throw std::runtime_error("创作草稿拍数无效。");
+    for (uint32_t i=0;i<beatCount;++i) {int beat=int(in.U32());double ms=duration();if (!p.beatTimes.emplace(beat,ms).second) throw std::runtime_error("创作草稿拍数重复。");}
+    if (version>=0x4d504302) {auto tempos=in.U32();if (tempos>65536) throw std::runtime_error("创作草稿速度变化过多。");for (uint32_t i=0;i<tempos;++i) {int tick=int(in.U32());double ms=duration();if (!p.tempoChanges.emplace(tick,ms).second) throw std::runtime_error("创作草稿速度变化重复。");}}
     auto count=in.U32();if (!count || count>MaxTracks) throw std::runtime_error("创作草稿音轨数量无效。");
     size_t noteCount=0;for (uint32_t i=0;i<count;++i) {
-        Track track;track.id=in.U32();track.name=in.String();track.instrument=int(in.U32());track.middleDo=int(in.U32());track.sustained=in.U32()!=0;track.visible=in.U32()!=0;
-        for (float& c:track.color) c=in.U32()/65535.f;auto n=in.U32();noteCount+=n;if (noteCount>200000) throw std::runtime_error("创作草稿音符过多。");
+        Track track;track.id=in.U32();track.name=in.String();track.instrument=int(in.U32());track.middleDo=int(in.U32());track.sustained=in.Bool();track.visible=in.Bool();
+        for (float& c:track.color) c=full ? in.F32():in.U32()/65535.f;auto n=in.U32();noteCount+=n;if (noteCount>200000) throw std::runtime_error("创作草稿音符过多。");
         for (uint32_t j=0;j<n;++j) {Note note;note.id=in.U32();note.row=int(in.U32());note.start=int(in.U32());note.length=int(in.U32());note.velocity=int(in.U32());track.notes.push_back(note);}p.tracks.push_back(std::move(track));
     }
-    if (in.pos!=bytes.size()) throw std::runtime_error("创作草稿包含多余数据。");p.Validate();return p;
+    EditorSettings e;
+    if (full) {
+        e.selectedTrack=int(in.U32());e.snap=int(in.U32());e.newLength=int(in.U32());e.velocity=int(in.U32());e.zoom=in.F32();e.pan=in.F32();e.positionBeat=in.F64();
+        e.receiveGame=in.Bool();e.activeNote=in.U32();auto selectedCount=in.U32();if (selectedCount>200000) throw std::runtime_error("创作工程选择数量无效。");
+        for (uint32_t i=0;i<selectedCount;++i) if (!e.selection.insert(in.U32()).second) throw std::runtime_error("创作工程选择标识重复。");
+        e.inspectorTab=int(in.U32());e.moreSettings=in.Bool();e.sidebarWidth=in.F32();e.trackScroll=in.F32();
+    }
+    if (in.pos!=bytes.size()) throw std::runtime_error("创作草稿包含多余数据。");p.Validate();ValidateEditor(p,e);if (editor) *editor=std::move(e);return p;
 }
 Project Project::Import(const midi::Song& song,ImportStats& stats) {
     stats=ImportStats{};Project p;p.tracks.clear();p.nextId=1;
