@@ -30,6 +30,10 @@ std::mutex mutex;
 Calibration calibration;
 bool manualLogging=false;
 std::deque<ManualNote> manualNotes;
+bool inputCapture=false;
+size_t lostInput=0;
+std::deque<InputEvent> inputEvents;
+std::map<uint32_t,InputEvent> inputVoices;
 locator::Result resolved;
 std::array<UiFn,8> uiOriginal{};
 ShortFn shortOriginal=nullptr;
@@ -55,6 +59,27 @@ bool ClassOf(void* object,void** klass) {
     if (!object) return false;
     __try { *klass=*reinterpret_cast<void**>(object); return *klass!=nullptr; }
     __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void EnqueueInput(const InputEvent& event) {
+    if (inputEvents.size()==4096) {inputEvents.pop_front();++lostInput;}
+    inputEvents.push_back(event);
+}
+void CaptureInput(const ManualNote& note,uint32_t handle,double time,UiContext* ui=nullptr) {
+    if (inPlugin || (!note.sustained && !ui) || (note.sustained && !handle)) return;
+    std::lock_guard<std::mutex> lock(mutex);if (!inputCapture) return;
+    InputEvent event;event.instrument=note.instrument;event.noteKey=note.noteKey;event.sustained=note.sustained;event.handle=handle;event.timeMs=time;
+    if (note.sustained) {
+        auto existing=inputVoices.find(handle);
+        if (existing!=inputVoices.end()) {auto off=existing->second;off.on=false;off.timeMs=time;EnqueueInput(off);}
+        else if (inputVoices.size()>=4096) {++lostInput;return;}
+        inputVoices[handle]=event;
+    }
+    EnqueueInput(event);
+}
+void CaptureStop(uint32_t handle,double time) {
+    if (inPlugin) return;std::lock_guard<std::mutex> lock(mutex);if (!inputCapture) return;
+    auto it=inputVoices.find(handle);if (it==inputVoices.end()) return;
+    auto event=it->second;event.on=false;event.timeMs=time;EnqueueInput(event);inputVoices.erase(it);
 }
 void Record(ManualNote note,UiContext* ui=nullptr) {
     if (inPlugin && !manualPlayback) return;
@@ -85,6 +110,7 @@ template<int Slot> int64_t __fastcall UiHook(void* owner,int index,void* method)
 int64_t __fastcall ShortHook(void* owner,void* position,int instrument,int key,uint8_t flag,void* method) {
     if (replay) { instrument=replay->instrument; key=replay->key; replay->entered=true; }
     ManualNote note;note.instrument=instrument;note.noteKey=key;note.owner=owner;note.position=position;note.flag=flag;note.method=method;Record(note,uiActive);
+    CaptureInput(note,0,NowMs(),uiActive);
     return shortOriginal(owner,position,instrument,key,flag,method);
 }
 int64_t __fastcall EmitOldHook(void* owner,uint32_t entity,int instrument,int key,void* method) {
@@ -96,10 +122,18 @@ int64_t __fastcall EmitNewHook(void* owner,uint32_t entity,int instrument,int ke
     return reinterpret_cast<EmitNew>(emitOriginal)(owner,entity,instrument,key,extra,method);
 }
 uint32_t __fastcall PlayOldHook(int instrument,int key,uint8_t sync,void* method) {
-    RecordPlay(instrument,key,sync,0,method);return reinterpret_cast<PlayOld>(playOriginal)(instrument,key,sync,method);
+    double time=NowMs();RecordPlay(instrument,key,sync,0,method);auto handle=reinterpret_cast<PlayOld>(playOriginal)(instrument,key,sync,method);
+    ManualNote note;note.instrument=instrument;note.noteKey=key;note.sustained=true;CaptureInput(note,handle,time);return handle;
 }
 uint32_t __fastcall PlayNewHook(int instrument,int key,uint8_t sync,uint8_t extra,void* method) {
-    RecordPlay(instrument,key,sync,extra,method);return reinterpret_cast<PlayNew>(playOriginal)(instrument,key,sync,extra,method);
+    double time=NowMs();RecordPlay(instrument,key,sync,extra,method);auto handle=reinterpret_cast<PlayNew>(playOriginal)(instrument,key,sync,extra,method);
+    ManualNote note;note.instrument=instrument;note.noteKey=key;note.sustained=true;CaptureInput(note,handle,time);return handle;
+}
+uint8_t __fastcall StopOldHook(uint32_t handle,uint8_t sync,void* method) {
+    double time=NowMs();auto ok=reinterpret_cast<StopOld>(stopOriginal)(handle,sync,method);if (ok) CaptureStop(handle,time);return ok;
+}
+uint8_t __fastcall StopNewHook(uint32_t handle,uint8_t sync,uint8_t extra,void* method) {
+    double time=NowMs();auto ok=reinterpret_cast<StopNew>(stopOriginal)(handle,sync,extra,method);if (ok) CaptureStop(handle,time);return ok;
 }
 int64_t __fastcall PumpHook(void* method) {
     auto result=pumpOriginal(method);
@@ -175,7 +209,7 @@ bool Bridge::Install(const locator::Result& result,uintptr_t base,const std::fun
         hook(result.shortPlay,reinterpret_cast<void*>(ShortHook),reinterpret_cast<void**>(&shortOriginal));
         hook(result.emitShort,result.extraFlag ? reinterpret_cast<void*>(EmitNewHook):reinterpret_cast<void*>(EmitOldHook),&emitOriginal);
         hook(result.gamePlay,result.extraFlag ? reinterpret_cast<void*>(PlayNewHook):reinterpret_cast<void*>(PlayOldHook),&playOriginal);
-        stopOriginal=reinterpret_cast<void*>(base+result.gameStop);
+        hook(result.gameStop,result.extraFlag ? reinterpret_cast<void*>(StopNewHook):reinterpret_cast<void*>(StopOldHook),&stopOriginal);
         for (size_t i=0;i<result.shortUi.size();++i) hook(result.shortUi[i],uiHooks[i],reinterpret_cast<void**>(&uiOriginal[i]));
         hook(result.mainThread,reinterpret_cast<void*>(PumpHook),reinterpret_cast<void**>(&pumpOriginal));
         // Only enable hooks owned by this DLL. No MH_ALL_HOOKS operation.
@@ -197,6 +231,7 @@ void Bridge::Shutdown() {
     std::lock_guard<std::mutex> lock(mutex); calibration=Calibration{};
     instrumentExtras.clear();
     manualLogging=false; manualNotes.clear();
+    inputCapture=false;inputEvents.clear();inputVoices.clear();lostInput=0;
 }
 Calibration Bridge::Status() const {std::lock_guard<std::mutex> lock(mutex); return calibration;}
 void Bridge::SetManualLogging(bool enabled) {
@@ -206,6 +241,12 @@ void Bridge::SetManualLogging(bool enabled) {
 }
 std::vector<ManualNote> Bridge::ManualNotes() const {
     std::lock_guard<std::mutex> lock(mutex); return {manualNotes.begin(),manualNotes.end()};
+}
+void Bridge::SetInputCapture(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex);inputCapture=enabled;inputEvents.clear();inputVoices.clear();lostInput=0;
+}
+InputBatch Bridge::TakeInput() {
+    std::lock_guard<std::mutex> lock(mutex);InputBatch batch;batch.events.assign(inputEvents.begin(),inputEvents.end());batch.lost=lostInput;inputEvents.clear();lostInput=0;return batch;
 }
 bool Bridge::ManualShort(int instrument,int key,std::string& error) {ManualScope scope;return Short(instrument,key,error);}
 player::StartResult Bridge::ManualStart(int instrument,int key,uint32_t& handle,std::string& error) {ManualScope scope;return Start(instrument,key,handle,error);}

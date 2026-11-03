@@ -29,7 +29,7 @@ composition::Note* View::Note() {if (selected_<0 || selected_>=int(project.track
 void View::FocusSelection(unsigned preferred) {
     note_=0;
     for (size_t i=0;i<project.tracks.size();++i) for (const auto& n:project.tracks[i].notes) if (selection_.count(n.id) && (!preferred || n.id==preferred)) {
-        Select(int(i),false);note_=n.id;inspectorRequest_=1;return;
+        Select(int(i),false);note_=n.id;newLength_=n.length;inspectorRequest_=1;return;
     }
 }
 void View::PruneSelection() {
@@ -72,10 +72,20 @@ void View::Release() {
     StopRecording();StopAudition();seeking_=false;
     if (dragging_) {dragging_=false;Save();}
 }
+void View::LoseFocus() {
+    if (!recording_ || !receiveGame_) {Release();return;}
+    Tick();ReleaseRecordingVoices();recordHeld_.fill(false);StopAudition();
+    if (seeking_) {recordStartMs_=project.Time(positionBeat_);recordClock_=game::NowMs();seeking_=false;}
+    if (dragging_) {dragging_=false;Save();}
+}
+void View::Tick() {
+    if (!recording_) return;RecordGameInput();UpdateRecording();
+    if (positionBeat_>=project.beats) StopRecording();
+}
 void View::ResetPlayback() {StopRecording();positionBeat_=0;seeking_=false;transportLoaded_=false;}
 void View::Seek(double beat,const app::Status& status) {
     positionBeat_=std::max(0.,std::min(double(project.beats),beat));
-    if (recording_) {recordStartMs_=project.Time(positionBeat_);recordClock_=game::NowMs();return;}
+    if (recording_) {recordStartMs_=project.Time(positionBeat_);recordClock_=game::NowMs();gameVoices_.clear();app::SetGameInputCapture(receiveGame_);return;}
     if (!Active(status.transport.state)) {transportLoaded_=false;return;}
     if (!transportLoaded_) return;
     app::Command command;command.action=app::Action::Seek;command.value=project.Time(positionBeat_);
@@ -85,27 +95,61 @@ void View::StartRecording() {
     Release();app::Command stop;stop.action=app::Action::Stop;
     if (!app::Send(stop)) {error_="命令队列已满。";return;}
     if (positionBeat_>=project.beats) positionBeat_=0;
-    recording_=true;transportLoaded_=false;recordRemembered_=false;recordedNotes_=0;recordMouseRow_=-1;
+    recording_=true;transportLoaded_=false;recordRemembered_=false;recordedNotes_=0;skippedGameNotes_=0;recordMouseRow_=-1;gameVoices_.clear();
     recordHeld_.fill(false);recordVoices_.fill(RecordVoice{});recordStartMs_=project.Time(positionBeat_);recordClock_=game::NowMs();error_.clear();notice_.clear();
+    app::SetGameInputCapture(receiveGame_);
+}
+void View::ExtendRecordedNote(const RecordVoice& voice,int endTick) {
+    if (!voice.note) return;auto& notes=project.tracks[voice.track].notes;composition::Note* note=nullptr;
+    for (auto& n:notes) if (n.id==voice.note) {note=&n;break;}
+    if (!note) return;int end=project.beats*composition::PPQ;
+    for (const auto& n:notes) if (n.id!=note->id && n.row==note->row && n.start>note->start) end=std::min(end,n.start);
+    note->length=std::max(1,std::min(end,endTick)-note->start);
 }
 void View::UpdateRecording() {
     if (!recording_ || seeking_) return;
     positionBeat_=project.BeatAt(recordStartMs_+std::max(0.,game::NowMs()-recordClock_));
     int tick=std::min(project.beats*composition::PPQ,int(std::llround(positionBeat_*composition::PPQ)));
-    for (const auto& voice:recordVoices_) if (voice.note) {
-        auto& notes=project.tracks[voice.track].notes;composition::Note* note=nullptr;
-        for (auto& n:notes) if (n.id==voice.note) {note=&n;break;}
-        if (!note) continue;int end=project.beats*composition::PPQ;
-        for (const auto& n:notes) if (n.id!=note->id && n.row==note->row && n.start>note->start) end=std::min(end,n.start);
-        note->length=std::max(1,std::min(end,tick)-note->start);
-    }
+    for (const auto& voice:recordVoices_) ExtendRecordedNote(voice,tick);
+    for (const auto& voice:gameVoices_) ExtendRecordedNote(voice.second,tick);
 }
 void View::ReleaseRecordingVoices() {
     app::Command release;release.action=app::Action::ManualRelease;app::Send(release);recordVoices_.fill(RecordVoice{});recordMouseRow_=-1;
 }
 void View::StopRecording() {
-    if (!recording_) return;UpdateRecording();ReleaseRecordingVoices();recording_=false;recordHeld_.fill(false);
+    if (!recording_) return;RecordGameInput();UpdateRecording();app::SetGameInputCapture(false);gameVoices_.clear();ReleaseRecordingVoices();recording_=false;recordHeld_.fill(false);
+    if (auto note=Note()) newLength_=note->length;
     if (recordRemembered_) Save();notice_=recordedNotes_ ? "即时创作已写入 "+std::to_string(recordedNotes_)+" 个音符 · 可撤销整次录入":"即时创作已结束，未录入音符。";
+    if (skippedGameNotes_) notice_+=" · 游戏音符跳过 "+std::to_string(skippedGameNotes_);
+}
+unsigned View::AddRecordedNote(int row,int start,int length) {
+    composition::Note candidate;candidate.row=row;candidate.start=start;candidate.length=std::min(length,project.beats*composition::PPQ-start);candidate.velocity=velocity_;
+    if (!project.Place(selected_,candidate)) {error_="此位置已有同轨的同音高音符，本次录入已跳过。";return 0;}
+    try {
+        if (!recordRemembered_) {Remember();recordRemembered_=true;}
+        auto id=project.AddNote(selected_,row,start,candidate.length,velocity_);project.tracks[selected_].visible=true;++recordedNotes_;
+        selection_.clear();selection_.insert(id);note_=id;inspectorRequest_=1;return id;
+    }catch (const std::exception& e) {error_=e.what();return 0;}
+}
+void View::RecordGameInput() {
+    if (!recording_ || !receiveGame_) return;auto batch=app::TakeGameInput();
+    if (batch.lost) {skippedGameNotes_+=batch.lost;error_="游戏输入缓存超限，部分输入已遗漏。";}
+    std::stable_sort(batch.events.begin(),batch.events.end(),[](const game::InputEvent& a,const game::InputEvent& b) {return a.timeMs<b.timeMs;});
+    bool changed=false;
+    for (const auto& event:batch.events) {
+        if (seeking_ || event.timeMs<recordClock_) continue;
+        double ms=recordStartMs_+event.timeMs-recordClock_;int tick=int(std::llround(project.BeatAt(ms)*composition::PPQ));
+        if (!event.on) {
+            auto voice=gameVoices_.find(event.handle);if (voice!=gameVoices_.end()) {ExtendRecordedNote(voice->second,tick);gameVoices_.erase(voice);changed=true;}continue;
+        }
+        if (tick>=project.beats*composition::PPQ) continue;
+        int pitch=60+event.noteKey-project.tracks[selected_].middleDo,row=notepalette::Row(pitch);
+        if (row<0) {++skippedGameNotes_;continue;}
+        auto id=AddRecordedNote(row,tick,event.sustained ? 1:newLength_);
+        if (!id) {++skippedGameNotes_;continue;}changed=true;
+        if (event.sustained) gameVoices_[event.handle]=RecordVoice(id,selected_);
+    }
+    if (changed) Save();
 }
 void View::RecordInput(const app::Status& status,bool input) {
     if (!recording_) return;const auto& io=ImGui::GetIO();bool released=false;
@@ -115,14 +159,7 @@ void View::RecordInput(const app::Status& status,bool input) {
         if (down && !recordHeld_[row] && !io.KeyCtrl && !io.KeyAlt && !io.KeySuper && !seeking_) {
             auto& track=project.tracks[selected_];int start=int(std::llround(positionBeat_*composition::PPQ));
             if (start<project.beats*composition::PPQ) {
-                composition::Note candidate;candidate.row=row;candidate.start=start;candidate.length=1;candidate.velocity=velocity_;
-                if (project.Place(selected_,candidate)) {
-                    try {
-                        if (!recordRemembered_) {Remember();recordRemembered_=true;}
-                        auto id=project.AddNote(selected_,row,start,1,velocity_);track.visible=true;recordVoices_[row]={id,selected_};++recordedNotes_;
-                        selection_.clear();selection_.insert(id);note_=id;inspectorRequest_=1;
-                    }catch (const std::exception& e) {error_=e.what();}
-                }else error_="此位置已有同轨的同音高音符，本次录入已跳过。";
+                auto id=AddRecordedNote(row,start,1);if (id) recordVoices_[row]=RecordVoice(id,selected_);
                 bool ready=status.preview || (status.game.ready && status.game.threadId && (!player::UsesShort(track.instrument,track.sustained) || status.game.shortReady));
                 if (ready) {app::Command command;command.action=app::Action::ManualOn;command.slot=row;command.instrument=track.instrument;command.sustained=track.sustained;command.key=track.middleDo+notepalette::RowPitch(row)-60;if (!app::Send(command)) error_="试听命令队列已满。";}
                 else if (recordVoices_[row].note) error_="音符已记录；发声前请先在游戏短音乐器界面弹一个音完成校准。";
@@ -234,7 +271,7 @@ void View::Sidebar(bool locked) {
         ImGui::SetNextItemWidth(S(85));change=ImGui::SliderInt("力度",&velocity,1,127) || change;
         if (change && std::isfinite(start) && std::isfinite(length) && start>=0 && length>0 && start+length<=project.beats) {
             auto n=*note;n.start=int(std::llround(start*composition::PPQ));n.length=int(std::llround(length*composition::PPQ));n.velocity=velocity;
-            if (project.Place(selected_,n)) {Remember();*note=n;error_.clear();Save();}else error_="同一轨的同音高音符不能重叠。";
+            if (project.Place(selected_,n)) {Remember();*note=n;newLength_=n.length;error_.clear();Save();}else error_="同一轨的同音高音符不能重叠。";
         }
         if (ImGui::Button("删除音符 / Delete")) Remove();ui::Mark("composer_delete_note");
     }else ui::Muted("点击空白添加音符。\n点击音符查看开始、时长和力度。");
@@ -257,7 +294,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     bool hovered=ImGui::IsItemHovered();ui::MarkRect("composer_ruler",ImVec2(left,origin.y),ImVec2(right,top));
     bool transportInput=focused && !io.AppFocusLost && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId);
     bool rulerHovered=hovered && io.MousePos.x>=left && io.MousePos.y<top;
-    if (transportInput && rulerHovered && !dragging_ && ImGui::IsMouseClicked(0)) {if (recording_) ReleaseRecordingVoices();seeking_=true;}
+    if (transportInput && rulerHovered && !dragging_ && ImGui::IsMouseClicked(0)) {if (recording_) {ReleaseRecordingVoices();gameVoices_.clear();app::SetGameInputCapture(receiveGame_);}seeking_=true;}
     if (seeking_) {
         if (!transportInput) seeking_=false;
         else {
@@ -327,8 +364,8 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
             }
             else if (!io.KeyCtrl && project.tracks[selected_].visible) {
                 int start=int(std::floor((pan_+(io.MousePos.x-left)/beatWidth)*composition::PPQ/snapTicks))*snapTicks;
-                int length=std::min(length_*composition::PPQ/4,project.beats*composition::PPQ-start);
-                if (start>=0 && length>0) try {Remember();note_=project.AddNote(selected_,row,start,length,velocity_);selection_.clear();selection_.insert(note_);inspectorRequest_=1;BeginDrag(true,true);error_.clear();Save();Audition(status,row);}catch (const std::exception& e) {error_=e.what();}
+                int length=std::min(newLength_,project.beats*composition::PPQ-start);
+                if (start>=0 && length>0) try {Remember();note_=project.AddNote(selected_,row,start,length,velocity_);newLength_=length;selection_.clear();selection_.insert(note_);inspectorRequest_=1;BeginDrag(true,true);error_.clear();Save();Audition(status,row);}catch (const std::exception& e) {error_=e.what();}
             }else if (!io.KeyCtrl) error_="请先打开此轨的显示开关，再添加音符。";
         }
     }
@@ -337,7 +374,7 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
             deselectOnRelease_=false;int delta=int(std::llround((io.MousePos.x-dragX_)/beatWidth*composition::PPQ/snapTicks))*snapTicks;
             if (resizing_) {
                 auto moved=original_;moved.length=std::max(snapTicks,std::min(project.beats*composition::PPQ-moved.start,original_.length+delta));
-                if (moved.length!=n->length && project.Place(selected_,moved)) {if (!dragRemembered_) {Remember();dragRemembered_=true;}*n=moved;error_.clear();}
+                if (moved.length!=n->length && project.Place(selected_,moved)) {if (!dragRemembered_) {Remember();dragRemembered_=true;}*n=moved;newLength_=moved.length;error_.clear();}
             }else {
                 delta=std::max(-dragFirstTick_,std::min(project.beats*composition::PPQ-dragEndTick_,delta));
                 int rowDelta=std::max(-dragLowRow_,std::min(20-dragHighRow_,int(std::llround((io.MousePos.y-dragY_)/rowHeight))));
@@ -352,7 +389,6 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
         if (!input || !ImGui::IsMouseDown(0)) {dragging_=false;if (deselectOnRelease_ && input) {selection_.erase(note_);FocusSelection();}if (dragRemembered_) Save();}
     }
     if (audition_>=0 && (!input || game::NowMs()>=auditionEnd_)) StopAudition();
-    if (input && !io.WantTextInput && !dragging_ && hovered && ImGui::IsKeyPressed(ImGuiKey_Delete,false)) Remove();
     if (transportInput && hovered && io.MouseWheel!=0 && !dragging_ && !seeking_) {
         if (io.KeyCtrl) {float anchor=std::max(0.f,std::min(1.f,(io.MousePos.x-left)/(right-left))),at=pan_+anchor*span;zoom_=std::max(1.f,std::min(32.f,zoom_*float(std::pow(1.25,io.MouseWheel))));pan_=at-anchor*std::max(1.f,project.beats/zoom_);}
         else if (io.KeyShift) pan_-=io.MouseWheel*span*.1f;
@@ -360,7 +396,6 @@ void View::Grid(const app::Status& status,bool focused,bool locked) {
     ImGui::EndChild();
 }
 void View::Draw(const app::Status& status,HWND owner,float height,bool focused) {
-    UpdateRecording();if (recording_ && positionBeat_>=project.beats) StopRecording();
     if (transportLoaded_ && !seeking_ && (Active(status.transport.state) || status.transport.state==player::State::Finished || status.transport.state==player::State::Error)) positionBeat_=project.BeatAt(status.transport.positionMs);
     positionBeat_=std::max(0.,std::min(double(project.beats),positionBeat_));
     bool locked=recording_ || Active(status.transport.state);ImGui::BeginChild("composer_workspace",ImVec2(0,height),ImGuiChildFlags_Borders);
@@ -375,15 +410,16 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
     ImGui::SameLine();ImGui::TextDisabled("%.1f BPM",60000/project.beatMs);ImGui::SameLine();if (ImGui::Button("导入 MIDI…")) Import(owner);ui::Mark("composer_import");ImGui::EndDisabled();ImGui::SameLine();
     if (ImGui::Button("导出 MIDI…")) Export(owner);ui::Mark("composer_export");
     ImGui::BeginDisabled(locked);const char* snaps[]={"1 拍","1/2 拍","1/4 拍","1/8 拍","1/16 拍"};ImGui::SetNextItemWidth(S(110));ImGui::Combo("网格",&snap_,snaps,5);
-    ImGui::SameLine();ImGui::SetNextItemWidth(S(80));ImGui::SliderInt("新音时长 / 1/4 拍",&length_,1,32);ImGui::SameLine();ImGui::SetNextItemWidth(S(65));ImGui::SliderInt("新音力度",&velocity_,1,127);ImGui::EndDisabled();
+    ImGui::SameLine();ImGui::SetNextItemWidth(S(90));float newLength=newLength_/float(composition::PPQ);if (ImGui::InputFloat("新音时长 / 拍",&newLength,0,0,"%.3f") && std::isfinite(newLength) && newLength>0 && newLength<=composition::MaxBeats) newLength_=std::max(1,int(std::llround(newLength*composition::PPQ)));ImGui::SameLine();ImGui::SetNextItemWidth(S(65));ImGui::SliderInt("新音力度",&velocity_,1,127);ImGui::EndDisabled();
     ImGui::SameLine();if (ImGui::Button("全曲")) {zoom_=1;pan_=0;}ImGui::SameLine();ImGui::SetNextItemWidth(S(110));ImGui::SliderFloat("缩放",&zoom_,1,32,"%.1fx",ImGuiSliderFlags_Logarithmic);
     float span=std::max(1.f,project.beats/zoom_),maxPan=std::max(0.f,project.beats-span);pan_=std::max(0.f,std::min(maxPan,pan_));ImGui::SameLine();ImGui::SetNextItemWidth(S(110));ImGui::SliderFloat("起点 / 拍",&pan_,0,maxPan,"%.1f");
     ImGui::BeginDisabled(recording_);if (ImGui::Button(status.transport.state==player::State::Playing || status.transport.state==player::State::Countdown ? "暂停":"播放创作")) TogglePlayback(status);ui::Mark("composer_play");ImGui::EndDisabled();
     ImGui::SameLine();if (ImGui::Button("停止")) {app::Command c;c.action=app::Action::Stop;if (app::Send(c)) ResetPlayback();}ui::Mark("composer_stop");
     ImGui::SameLine();ImGui::BeginDisabled(Active(status.transport.state));if (ImGui::Button(recording_ ? "结束即时创作":"即时创作")) {if (recording_) StopRecording();else StartRecording();}ui::Mark("composer_record");ImGui::EndDisabled();
+    ImGui::SameLine();ImGui::BeginDisabled(recording_);ImGui::Checkbox("接收游戏弹奏",&receiveGame_);ui::Mark("composer_receive_game");ImGui::EndDisabled();
     if (!project.tempoChanges.empty() || !project.beatTimes.empty()) {ImGui::SameLine();ImGui::BeginDisabled(locked);if (ImGui::Button("统一拍长")) {Remember();project.tempoChanges.clear();project.beatTimes.clear();Save();}ImGui::EndDisabled();}
     ImGui::SameLine();ImGui::TextDisabled("位置 %s",ui::Time(project.Time(positionBeat_),true).c_str());
-    if (recording_) {ImGui::SameLine();ImGui::TextColored(ImVec4(1,.8f,.4f,1),"录入中 · Q–U / A–J / Z–M");}
+    if (recording_) {ImGui::SameLine();ImGui::TextColored(ImVec4(1,.8f,.4f,1),receiveGame_ ? "录入中 · 游戏 + 插件键盘":"录入中 · 插件键盘");}
     ImGui::TextDisabled("%u 轨 · %u 音符 · %s · 点击添加 / 拖动移动 / 拖右边缘改时长 / 右键删除",unsigned(project.tracks.size()),unsigned(project.NoteCount()),ui::Time(project.Time(project.beats)).c_str());
     if (!error_.empty()) ImGui::TextColored(ImVec4(1,.5f,.45f,1),"%s",error_.c_str());else if (!notice_.empty()) ImGui::TextWrapped("%s",notice_.c_str());
     if (!status.manualError.empty()) ImGui::TextColored(ImVec4(1,.5f,.45f,1),"试听：%s",ui::Utf8(ui::Widen(status.manualError)).c_str());
@@ -398,6 +434,7 @@ void View::Draw(const app::Status& status,HWND owner,float height,bool focused) 
     if (focused && !locked && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && ImGui::GetIO().KeyCtrl && !dragging_ && !seeking_) {
         if (ImGui::IsKeyPressed(ImGuiKey_Z,false)) Undo(ImGui::GetIO().KeyShift);else if (ImGui::IsKeyPressed(ImGuiKey_Y,false)) Undo(true);
     }
+    if (focused && !locked && !ImGui::GetIO().AppFocusLost && !ImGui::GetIO().WantTextInput && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId) && !dragging_ && !seeking_ && ImGui::IsKeyPressed(ImGuiKey_Delete,false)) Remove();
     ImGui::EndChild();
 }
 void View::Demo(bool record) {

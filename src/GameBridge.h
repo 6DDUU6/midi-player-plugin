@@ -22,6 +22,13 @@ struct ManualNote {
     void* method=nullptr;
     SYSTEMTIME localTime{};
 };
+struct InputEvent {
+    int instrument=0,noteKey=0;
+    bool sustained=false,on=true;
+    uint32_t handle=0;
+    double timeMs=0;
+};
+struct InputBatch {std::vector<InputEvent> events;size_t lost=0;};
 std::string FormatManualNote(const ManualNote& note);
 class Bridge:public player::Backend {
 public:
@@ -32,6 +39,8 @@ public:
     Calibration Status() const;
     void SetManualLogging(bool enabled);
     std::vector<ManualNote> ManualNotes() const;
+    void SetInputCapture(bool enabled);
+    InputBatch TakeInput();
     bool ManualShort(int instrument,int key,std::string& error);
     player::StartResult ManualStart(int instrument,int key,uint32_t& handle,std::string& error);
     bool Short(int instrument,int key,std::string& error) override;

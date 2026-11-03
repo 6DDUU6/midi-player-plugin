@@ -10,6 +10,8 @@ public:
     void Load(const std::wstring& path);
     void Draw(const app::Status& status,HWND owner,float height,bool focused);
     void Release();
+    void LoseFocus();
+    void Tick();
     void Demo(bool record=false);
     void TogglePlayback(const app::Status& status);
     void ResetPlayback();
@@ -18,9 +20,10 @@ public:
     double PositionBeat() const {return positionBeat_;}
     size_t SelectionCount() const {return selection_.size();}
     bool Recording() const {return recording_;}
+    int NewNoteLength() const {return newLength_;}
     bool OpenMidi(const std::wstring& path);
 private:
-    int selected_=0,snap_=2,length_=4,velocity_=100,audition_=-1;
+    int selected_=0,snap_=2,newLength_=composition::PPQ,velocity_=100,audition_=-1;
     int inspectorRequest_=0;
     double auditionEnd_=0;
     unsigned note_=0;
@@ -34,10 +37,13 @@ private:
     double positionBeat_=0;
     struct RecordVoice {unsigned note;int track;RecordVoice(unsigned n=0,int t=0):note(n),track(t) {}};
     std::array<RecordVoice,21> recordVoices_{};
+    std::map<uint32_t,RecordVoice> gameVoices_;
     std::array<bool,21> recordHeld_{};
     bool recording_=false,recordRemembered_=false;
+    bool receiveGame_=true;
     int recordMouseRow_=-1;
     size_t recordedNotes_=0;
+    size_t skippedGameNotes_=0;
     double recordClock_=0,recordStartMs_=0;
     composition::Note original_;
     float dragX_=0,dragY_=0;
@@ -62,6 +68,9 @@ private:
     void UpdateRecording();
     void ReleaseRecordingVoices();
     void RecordInput(const app::Status& status,bool input);
+    void RecordGameInput();
+    unsigned AddRecordedNote(int row,int start,int length);
+    void ExtendRecordedNote(const RecordVoice& voice,int endTick);
     void Audition(const app::Status& status,int row);
     void StopAudition();
     void Sidebar(bool locked);

@@ -412,7 +412,11 @@ void PrepareSmoke() {
         {"composer_ruler",[] {return app::GetStatus().transport.state==player::State::Stopped && std::abs(composerView.PositionBeat()-4)<.05;},.25f},
         {"composer_grid",[] {return composerView.project.NoteCount()==1;},.3f},
         {"composer_note",[] {const auto& n=composerView.project.tracks[0].notes[0];return n.row==8 && n.start>0;},.25f,.5f,1.25f,-1.2f},
-        {"composer_note",[] {return composerView.project.tracks[0].notes[0].length>composition::PPQ;},.95f,.5f,1.95f,.5f},
+        {"composer_note",[] {return composerView.project.tracks[0].notes[0].length>composition::PPQ && composerView.NewNoteLength()==composerView.project.tracks[0].notes[0].length;},.95f,.5f,1.95f,.5f},
+        {"composer_grid",[] {const auto& notes=composerView.project.tracks[0].notes;return notes.size()==2 && notes[1].length==notes[0].length;},.65f},
+        {"composer_delete_key",[] {return composerView.project.NoteCount()==1;}},
+        {"composer_undo",[] {return composerView.project.NoteCount()==2;}},
+        {"composer_undo",[] {return composerView.project.NoteCount()==1;}},
         {"composer_undo",[] {return composerView.project.tracks[0].notes[0].length==composition::PPQ;}},
         {"composer_undo",[] {return composerView.project.tracks[0].notes[0].row==9;}},
         {"composer_add_track",[] {return composerView.project.tracks.size()==2 && composerView.SelectedTrack()==1;}},
@@ -436,6 +440,10 @@ void PrepareSmoke() {
         {"composer_undo",[] {return composerView.project.tracks.size()==2 && composerView.project.NoteCount()==2;}},
         {"composer_first_note",[] {return composerView.SelectionCount()==1;}},
         {"composer_other_note",[] {composerGroupBefore={composerView.project.tracks[0].notes[0],composerView.project.tracks[1].notes[0]};return composerView.SelectionCount()==2;},.5f,.5f,-1,-1,0,true},
+        {"composer_delete_key",[] {return composerView.project.NoteCount()==0;}},
+        {"composer_undo",[] {return composerView.project.NoteCount()==2;}},
+        {"composer_first_note",[] {return composerView.SelectionCount()==1 && composerView.NewNoteLength()==composerView.project.tracks[0].notes[0].length;}},
+        {"composer_other_note",[] {return composerView.SelectionCount()==2;},.5f,.5f,-1,-1,0,true},
         {"composer_note",[] {const auto& p=composerView.project;int ticks=p.tracks[0].notes[0].start-composerGroupBefore[0].start,rowDelta=p.tracks[0].notes[0].row-composerGroupBefore[0].row;return ticks>0 && rowDelta<0 && p.tracks[1].notes[0].start-composerGroupBefore[1].start==ticks && p.tracks[1].notes[0].row-composerGroupBefore[1].row==rowDelta && p.tracks[0].notes[0].length==composerGroupBefore[0].length && p.tracks[1].notes[0].length==composerGroupBefore[1].length;},.25f,.5f,1.25f,-1.2f},
         {"composer_undo",[] {return composerView.project.tracks[0].notes[0].start==composerGroupBefore[0].start && composerView.project.tracks[1].notes[0].row==composerGroupBefore[1].row;}},
         {"composer_first_note",[] {return composerView.SelectionCount()==1;},.5f,.5f,-1,-1,0,true},
@@ -469,12 +477,13 @@ std::wstring Automation() {
     }
     if (smokeMode) {
         if (!automationPhase) return L"";auto& step=smokeSteps[smokeStep];
-        bool ruler=std::string(step.target)=="timeline_ruler",recordHeld=std::string(step.target)=="composer_record_held_keys",recordKeys=recordHeld || std::string(step.target)=="composer_record_keys";
+        bool ruler=std::string(step.target)=="timeline_ruler",recordHeld=std::string(step.target)=="composer_record_held_keys",recordKeys=recordHeld || std::string(step.target)=="composer_record_keys",deleteKey=std::string(step.target)=="composer_delete_key";
         if (step.wheel && (automationFrames==4 || automationFrames==5)) SmokeReport("Wheel: ctrl="+std::to_string(ImGui::GetIO().KeyCtrl)+" delta="+std::to_string(ImGui::GetIO().MouseWheel)+" zoom="+std::to_string(composerView.Zoom()));
-        if (automationFrames==3 && !(recordKeys ? (ui::TestKey(ImGuiKey_Q,true) && ui::TestKey(ImGuiKey_A,true)):step.wheel ? ui::TestWheel(step.target,true,step.wheel):ui::TestMouse(step.target,true,ruler ? .25f:step.x,step.y,step.control))) {SmokeReport(std::string("FAIL: missing widget ")+step.target);resultCode=4;running=false;}
-        if (automationFrames==4 && !recordKeys) {if (step.wheel) ui::TestWheel(step.target,true,0);else ui::TestMouse(step.target,step.endX>=0,ruler ? .75f:step.endX>=0 ? step.endX:step.x,step.endX>=0 ? step.endY:step.y,step.control);}
+        if (automationFrames==3 && !(deleteKey ? (ui::TestMouse("composer_record",false) && ui::TestKey(ImGuiKey_Delete,true)):recordKeys ? (ui::TestKey(ImGuiKey_Q,true) && ui::TestKey(ImGuiKey_A,true)):step.wheel ? ui::TestWheel(step.target,true,step.wheel):ui::TestMouse(step.target,true,ruler ? .25f:step.x,step.y,step.control))) {SmokeReport(std::string("FAIL: missing widget ")+step.target);resultCode=4;running=false;}
+        if (automationFrames==4 && !recordKeys && !deleteKey) {if (step.wheel) ui::TestWheel(step.target,true,0);else ui::TestMouse(step.target,step.endX>=0,ruler ? .75f:step.endX>=0 ? step.endX:step.x,step.endX>=0 ? step.endY:step.y,step.control);}
         if (automationFrames==6 && step.wheel) ui::TestWheel(step.target,false,0);
         if (automationFrames==5 && recordKeys && !recordHeld) {ui::TestKey(ImGuiKey_Q,false);ui::TestKey(ImGuiKey_A,false);}
+        if (automationFrames==5 && deleteKey) ui::TestKey(ImGuiKey_Delete,false);
         if (automationFrames==5 && step.endX>=0) ui::TestMouse(step.target,false,step.endX,step.endY,step.control);
         if (automationFrames==8) {
             bool ok=step.verify();SmokeReport(std::string(ok ? "PASS: click ":"FAIL: click ")+step.target);
@@ -501,10 +510,10 @@ void AfterFrame() {
 }
 bool HotkeysAllowed(HWND hwnd) {HWND front=GetForegroundWindow();wchar_t cls[128]{};GetClassNameW(front,cls,128);return front==hwnd || GetWindow(front,GW_OWNER)==hwnd || wcscmp(cls,L"UnityWndClass")==0;}
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
-    if (message==WM_KILLFOCUS || (message==WM_ACTIVATE && LOWORD(wp)==WA_INACTIVE) || (message==WM_SHOWWINDOW && !wp)) {performanceView.Release();composerView.Release();}
+    if (message==WM_KILLFOCUS || (message==WM_ACTIVATE && LOWORD(wp)==WA_INACTIVE) || (message==WM_SHOWWINDOW && !wp)) {performanceView.Release();composerView.LoseFocus();}
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(hwnd,message,wp,lp)) return TRUE;
     switch (message) {
-    case WM_SIZE:if (wp!=SIZE_MINIMIZED) ui::Resize(LOWORD(lp),HIWORD(lp));return 0;
+    case WM_SIZE:if (wp!=SIZE_MINIMIZED) ui::Resize(LOWORD(lp),HIWORD(lp));else composerView.LoseFocus();return 0;
     case WM_GETMINMAXINFO:reinterpret_cast<MINMAXINFO*>(lp)->ptMinTrackSize={LONG(S(1080)),LONG(S(720))};return 0;
     case WM_DPICHANGED:{auto r=reinterpret_cast<RECT*>(lp);SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);return 0;}
     case WM_ERASEBKGND:return 1;case WM_SYSCOMMAND:if ((wp&0xfff0)==SC_KEYMENU) return 0;break;
@@ -513,7 +522,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     case WM_DESTROY:published.store(nullptr);running=false;PostQuitMessage(0);return 0;
     case WM_HOTKEY:
         if (!HotkeysAllowed(hwnd)) return 0;
-        if (wp==1) {if (IsWindowVisible(hwnd)) {performanceView.Release();composerView.Release();ShowWindow(hwnd,SW_HIDE);}else {ShowWindow(hwnd,SW_RESTORE);SetForegroundWindow(hwnd);}}
+        if (wp==1) {if (IsWindowVisible(hwnd)) {performanceView.Release();composerView.LoseFocus();ShowWindow(hwnd,SW_HIDE);}else {ShowWindow(hwnd,SW_RESTORE);SetForegroundWindow(hwnd);}}
         else if (wp==3) {performanceView.Release(true);composerView.Release();Stop();}else if (wp==2 && !editor.open && !manualView) {if (compositionView) composerView.TogglePlayback(app::GetStatus());else {auto state=app::GetStatus().transport.state;if (state==player::State::Playing || state==player::State::Countdown) Pause();else StartPlayback();}}return 0;
     }return DefWindowProcW(hwnd,message,wp,lp);
 }
@@ -531,7 +540,7 @@ int Run(HINSTANCE module,bool preview,bool smoke,bool snapshot) {
     published.store(window);ui::EnableTestInput(smoke);RegisterHotKey(window,1,MOD_CONTROL|MOD_NOREPEAT,VK_OEM_MINUS);RegisterHotKey(window,2,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,'P');RegisterHotKey(window,3,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,'S');
     if (preview && !smoke && !snapshot) ShowWindow(window,SW_SHOW);if (preview) LoadFile(directory+L"..\\examples\\飞鼠plus.mid");DWORD began=GetTickCount();MSG msg{};
     while (running) {
-        while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {if (msg.message==WM_QUIT) {running=false;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if (!running) break;app::PreviewTick();bool automation=smoke || snapshot;
+        while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {if (msg.message==WM_QUIT) {running=false;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if (!running) break;app::PreviewTick();if (compositionView) composerView.Tick();bool automation=smoke || snapshot;
         if (automation && GetTickCount()-began>30000) {resultCode=6;break;}
         if (automation || (IsWindowVisible(window) && !IsIconic(window))) {if (!ui::NewFrame()) {resultCode=12;break;}Draw();auto snapshotPath=Automation();if (!ui::Render(snapshotPath)) {resultCode=13;break;}AfterFrame();}
         else MsgWaitForMultipleObjects(0,nullptr,FALSE,25,QS_ALLINPUT);

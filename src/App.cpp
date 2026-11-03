@@ -105,4 +105,6 @@ void PreviewTick() {if (preview.load()) Tick(game::NowMs());}
 void PreviewTick(double nowMs) {if (preview.load()) Tick(nowMs);}
 void SetManualLogging(bool enabled) {bridge.SetManualLogging(enabled);}
 std::vector<game::ManualNote> ManualNotes() {return bridge.ManualNotes();}
+void SetGameInputCapture(bool enabled) {bridge.SetInputCapture(enabled);}
+game::InputBatch TakeGameInput() {return bridge.TakeInput();}
 }

@@ -21,6 +21,8 @@ bool Send(const Command& command);
 Status GetStatus();
 void SetManualLogging(bool enabled);
 std::vector<game::ManualNote> ManualNotes();
+void SetGameInputCapture(bool enabled);
+game::InputBatch TakeGameInput();
 void PreviewTick();
 void PreviewTick(double nowMs); // Deterministic preview clock for native unit tests.
 }
