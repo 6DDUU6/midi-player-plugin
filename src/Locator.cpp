@@ -8,9 +8,9 @@
 namespace locator {
 const std::map<std::string,std::string>& Patterns() {
     static const std::map<std::string,std::string> p={
-        {"emitShort","C7 ?? 30 05 00 00 00 48 8B ?? ?? 48 85 C9"},
-        {"emitStart","C7 ?? 30 06 00 00 00 48 8B ?? ?? 48 85 C9"},
-        {"emitStop","C7 ?? 30 07 00 00 00 48 8B ?? ?? 48 85 C9"},
+        {"emitShort","C7 ?? ?? 05 00 00 00 48 8B ?? ?? 48 85 C9"},
+        {"emitStart","C7 ?? ?? 06 00 00 00 48 8B ?? ?? 48 85 C9"},
+        {"emitStop","C7 ?? ?? 07 00 00 00 48 8B ?? ?? 48 85 C9"},
         {"shortPlay","44 89 CD 44 89 C3 48 89 D7 49 89 CE 44 0F B6 BC 24 ?? ?? ?? ?? 80 3D ?? ?? ?? ?? 00 0F 85 ?? ?? ?? ?? 49 8B 46 10 48 85 C0"},
         {"component","BA 00 C0 00 00 E8 ?? ?? ?? ?? 48 85 C0"},
         {"mainThread","48 83 EC 28 E8 ?? ?? ?? ?? 48 85 C0 74 0C 48 8B 08 48 3B 0D ?? ?? ?? ?? 74 05 48 83 C4 28 C3 48 89 C1 48 83 C4 28 E9"}
@@ -95,65 +95,88 @@ template<class T> T only(const std::vector<T>& values,const std::string& name) {
     return values[0];
 }
 bool refs(const Body& b,uint32_t target) { for (auto r:b.refs) if (r.target==target) return true; return false; }
+struct MessageLayout {int command,list,entity,flag;};
+struct Message {
+    Body body;uint32_t anchor,append,lastAppend;const MessageLayout* layout;
+};
+bool MatchMessage(Body body,uint32_t anchor,uint32_t value,int count,Message& message) {
+    if (!body.instructions.count(anchor) || !body.loads.count(anchor+7)) return false;
+    std::vector<Store> commands,entities,flags;
+    for (auto s:body.stores) if (s.at==anchor && s.immediate && s.value==value) commands.push_back(s);
+    if (commands.size()!=1) return false;const auto& command=commands[0];
+    for (auto s:body.stores) if (s.base==command.base) {
+        if (s.at<anchor && !s.immediate) entities.push_back(s);
+        if (s.at>anchor && s.immediate && s.value==1) flags.push_back(s);
+    }
+    if (entities.size()!=1) return false;
+    // Both supported releases use the extra-flag ABI with different field orders.
+    static const MessageLayout layouts[]={
+        {0x30,0x20,0x38,0x34},
+        {0x38,0x28,0x34,0x30}
+    };
+    const MessageLayout* layout=nullptr;
+    for (const auto& candidate:layouts) if (command.offset==candidate.command && body.loads.at(anchor+7)==candidate.list && entities[0].offset==candidate.entity &&
+        flags.size()==1 && flags[0].offset==candidate.flag) {
+        if (layout) return false;layout=&candidate;
+    }
+    if (!layout) return false;
+    auto first=std::find_if(body.refs.begin(),body.refs.end(),[&](Ref r){return r.at>anchor && !r.tail;});
+    if (first==body.refs.end()) return false;
+    uint32_t append=first->target,last=0;int found=0;
+    for (auto r:body.refs) if (r.target==append && !r.tail) {++found;last=r.at;}
+    if (found!=count) return false;
+    message={std::move(body),anchor,append,last,layout};return true;
+}
 }
 Result Resolve(const Hits& hits,const Reader& reader) {
     auto read=[&](uint32_t rva) {return reader(rva,{});};
-    std::map<std::string,Body> bodies; std::map<std::string,uint32_t> anchors;
-    for (const auto& name:{"emitShort","emitStart","emitStop","shortPlay"}) {
-        anchors[name]=only(hits.at(name),name); auto b=read(anchors[name]);
-        if (!b.instructions.count(anchors[name])) throw std::runtime_error(std::string(name)+": signature is not instruction-aligned");
-        bodies[name]=std::move(b);
+    std::map<std::string,Message> messages;
+    for (const auto& role:std::map<std::string,std::pair<uint32_t,int>>{{"emitShort",{5,2}},{"emitStart",{6,3}},{"emitStop",{7,1}}}) {
+        std::vector<Message> candidates;
+        for (auto hit:hits.at(role.first)) {
+            try {
+                Message message;
+                if (MatchMessage(read(hit),hit,role.second.first,role.second.second,message)) candidates.push_back(std::move(message));
+            }catch (const std::runtime_error&) {
+                // Broad signatures can hit unrelated code with unsupported unwind/decode shapes.
+            }
+        }
+        messages[role.first]=only(candidates,role.first);
     }
-    std::vector<uint32_t> appends; std::vector<int> offsets;
+    auto shortAnchor=only(hits.at("shortPlay"),"shortPlay");auto shortBody=read(shortAnchor);
+    if (!shortBody.instructions.count(shortAnchor)) throw std::runtime_error("shortPlay: signature is not instruction-aligned");
+    const auto& firstMessage=messages.at("emitShort");
     std::vector<std::set<uint32_t>> tails; std::set<uint32_t> setup;
-    for (const auto& item:std::map<std::string,int>{{"emitShort",2},{"emitStart",3},{"emitStop",1}}) {
-        const auto& b=bodies.at(item.first); auto anchor=anchors.at(item.first);
-        auto first=std::find_if(b.refs.begin(),b.refs.end(),[&](Ref r){return r.at>anchor && !r.tail;});
-        if (first==b.refs.end()) throw std::runtime_error("Missing integer list append");
-        appends.push_back(first->target); int count=0; uint32_t last=0;
-        for (auto r:b.refs) if (r.target==first->target && !r.tail) {++count;last=r.at;}
-        if (count!=item.second || !b.loads.count(anchor+7)) throw std::runtime_error("Message list shape mismatch");
-        offsets.push_back(b.loads.at(anchor+7)); std::set<uint32_t> tail;
-        for (auto r:b.refs) { if (r.at>last) tail.insert(r.target); if (r.at<anchor) setup.insert(r.target); }
+    for (const auto& item:messages) {
+        const auto& message=item.second;
+        if (message.append!=firstMessage.append || message.layout!=firstMessage.layout) throw std::runtime_error("Messages do not share the same integer list and field layout");
+        std::set<uint32_t> tail;
+        for (auto r:message.body.refs) {if (r.at>message.lastAppend) tail.insert(r.target);if (r.at<message.anchor) setup.insert(r.target);}
         tails.push_back(std::move(tail));
     }
-    if (!std::all_of(appends.begin(),appends.end(),[&](uint32_t x){return x==appends[0];}) || !std::all_of(offsets.begin(),offsets.end(),[&](int x){return x==offsets[0];})) throw std::runtime_error("Messages do not share the same integer list");
     std::vector<uint32_t> senders;
     for (auto target:tails[0]) if (!setup.count(target) && tails[1].count(target) && tails[2].count(target)) senders.push_back(target);
-    Result out; out.sender=only(senders,"common sender"); out.shortPlay=bodies.at("shortPlay").start; out.emitShort=bodies.at("emitShort").start;
+    Result out;out.sender=only(senders,"common sender");out.shortPlay=shortBody.start;out.emitShort=firstMessage.body.start;
+    auto emitStart=messages.at("emitStart").body.start,emitStop=messages.at("emitStop").body.start;
     std::map<uint32_t,Body> candidates;
     for (auto hit:hits.at("component")) {
-        auto b=reader(hit,{out.emitShort,bodies.at("emitStart").start,bodies.at("emitStop").start});
-        if (!refs(b,out.emitShort) && !refs(b,bodies.at("emitStart").start) && !refs(b,bodies.at("emitStop").start)) continue;
+        auto b=reader(hit,{out.emitShort,emitStart,emitStop});
+        if (!refs(b,out.emitShort) && !refs(b,emitStart) && !refs(b,emitStop)) continue;
         if (!b.instructions.count(hit)) throw std::runtime_error("Unaligned component signature");
         candidates[b.start]=std::move(b);
     }
     std::vector<uint32_t> plays,stops;
     for (const auto& c:candidates) {
         const auto& b=c.second;
-        if (b.highBit && refs(b,bodies.at("emitStart").start)) plays.push_back(b.start);
-        if (b.highBit && refs(b,bodies.at("emitStop").start)) stops.push_back(b.start);
+        if (b.highBit && refs(b,emitStart)) plays.push_back(b.start);
+        if (b.highBit && refs(b,emitStop)) stops.push_back(b.start);
         if (refs(b,out.emitShort) && refs(b,out.shortPlay)) out.shortUi.push_back(b.start);
     }
     out.gamePlay=only(plays,"sustained play"); out.gameStop=only(stops,"sustained stop");
     if (out.shortUi.empty()) throw std::runtime_error("Missing short-note UI callback");
-    bool old=offsets[0]==0x28 && read(out.gamePlay).savedArgs==std::set<int>{1,2,8} && read(out.gameStop).savedArgs==std::set<int>{1,2};
-    bool current=offsets[0]==0x20 && read(out.gamePlay).savedArgs==std::set<int>{1,2,8,9} && read(out.gameStop).savedArgs==std::set<int>{1,2,8};
-    for (const auto& name:{"emitShort","emitStart","emitStop"}) {
-        const auto& b=bodies.at(name); uint32_t at=anchors.at(name);
-        std::vector<Store> command,entity,flags;
-        for (auto s:b.stores) if (s.at==at && s.offset==0x30 && s.immediate) command.push_back(s);
-        auto cmd=only(command,"command store");
-        for (auto s:b.stores) if (s.base==cmd.base) {
-            if (s.at<at && !s.immediate) entity.push_back(s);
-            if (s.at>at && s.immediate && s.value==1) flags.push_back(s);
-        }
-        auto e=only(entity,"entity store");
-        old=old && e.offset==0x34 && flags.empty();
-        current=current && e.offset==0x38 && flags.size()==1 && flags[0].offset==0x34;
-    }
-    if (old==current) throw std::runtime_error("Unknown or ambiguous instrument ABI");
-    out.extraFlag=current;
+    const std::set<int> playArgs={1,2,8,9},stopArgs={1,2,8};
+    if (read(out.gamePlay).savedArgs!=playArgs || read(out.gameStop).savedArgs!=stopArgs) throw std::runtime_error("Unknown or ambiguous instrument ABI");
+    out.extraFlag=true;
     std::vector<uint32_t> pumps;
     for (auto hit:hits.at("mainThread")) {
         auto b=read(hit); if (b.start!=hit || b.refs.size()!=2) continue;
